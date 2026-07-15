@@ -1,6 +1,6 @@
 // mcp-stdio.js — stdio MCP server.
 //
-// This is what runs when a harness invokes `npx -y pilot-mcp` with no args.
+// This is what runs when a harness invokes `npx -y pilotprotocol-mcp` with no args.
 // Reads JSON-RPC over stdin, writes responses to stdout. Diagnostic logs go to
 // stderr only — anything on stdout that isn't valid MCP framing breaks the
 // protocol.

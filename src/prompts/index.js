@@ -1,5 +1,7 @@
 // prompts/index.js — MCP prompts (user-controlled idioms surfaced to the LLM).
 
+import { ListPromptsRequestSchema, GetPromptRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+
 const PROMPTS = [
   {
     name: 'pilot-trust-readout',
@@ -71,11 +73,11 @@ const PROMPTS = [
 ];
 
 export function registerPrompts(server) {
-  server.setRequestHandler({ method: 'prompts/list' }, async () => ({
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
     prompts: PROMPTS.map(({ render, ...meta }) => meta),
   }));
 
-  server.setRequestHandler({ method: 'prompts/get' }, async (req) => {
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
     const p = PROMPTS.find((x) => x.name === req.params.name);
     if (!p) throw new Error(`unknown prompt: ${req.params.name}`);
     return { messages: p.render(req.params.arguments ?? {}) };

@@ -20,6 +20,6 @@ export async function configure() {
   current.tools = current.tools ?? {};
   current.tools.mcp = current.tools.mcp ?? {};
   current.tools.mcp.servers = current.tools.mcp.servers ?? {};
-  current.tools.mcp.servers.pilot = { command: 'npx', args: ['-y', 'pilot-mcp'] };
+  current.tools.mcp.servers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
   writeFileSync(CONFIG, JSON.stringify(current, null, 2));
 }

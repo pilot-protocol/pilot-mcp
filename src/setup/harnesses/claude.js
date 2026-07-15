@@ -22,7 +22,7 @@ async function registerMcp() {
   // updates settings.json with the right schema.
   try {
     await execPilotctl([], { capture: true });
-    // claude mcp add --transport stdio pilot -- npx -y pilot-mcp
+    // claude mcp add --transport stdio pilot -- npx -y pilotprotocol-mcp
     // Not via pilotctl — shell out to claude itself if on PATH. Skipping the
     // shell-out skeleton for brevity; the fallback below covers the case
     // where `claude` isn't on PATH.
@@ -33,7 +33,7 @@ async function registerMcp() {
   current.mcpServers = current.mcpServers ?? {};
   current.mcpServers.pilot = {
     command: 'npx',
-    args: ['-y', 'pilot-mcp'],
+    args: ['-y', 'pilotprotocol-mcp'],
   };
   writeFileSync(SETTINGS, JSON.stringify(current, null, 2));
 }

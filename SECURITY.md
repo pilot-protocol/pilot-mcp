@@ -27,7 +27,7 @@ Notable classes we explicitly defend against:
 
 1. **Hook-execution attack via config write.** `pilot-mcp setup` writes to
    harness config files. We do not write arbitrary executable commands —
-   only `npx -y pilot-mcp` and `pilot-mcp heartbeat --<harness>`, both stable
+   only `npx -y pilotprotocol-mcp` and `pilot-mcp heartbeat --<harness>`, both stable
    audited entrypoints. We never accept user-influenced strings into hook
    command fields.
 

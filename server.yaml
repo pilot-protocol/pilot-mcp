@@ -17,7 +17,7 @@ about:
     peer-to-peer with no SaaS in the middle.
   icon: https://pilotprotocol.network/logo.svg
 source:
-  project: https://github.com/TeoSlayer/pilot-mcp
+  project: https://github.com/pilot-protocol/pilot-mcp
   branch: main
 config:
   description: Pilot daemon must be running locally (or set PILOT_DAEMON_URL).

@@ -12,7 +12,7 @@
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "pilot-mcp",
+      "identifier": "pilotprotocol-mcp",
       "version": "0.1.0",
       "transport": { "type": "stdio" }
     }

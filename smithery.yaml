@@ -3,7 +3,7 @@ start:
   command: npx
   args:
     - "-y"
-    - pilot-mcp
+    - pilotprotocol-mcp
 configSchema:
   type: object
   properties:

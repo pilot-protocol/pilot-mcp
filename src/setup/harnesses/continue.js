@@ -13,7 +13,7 @@ schema: v1
 mcpServers:
   - name: pilot
     command: npx
-    args: ["-y", "pilot-mcp"]
+    args: ["-y", "pilotprotocol-mcp"]
 `;
 
 export async function configure() {

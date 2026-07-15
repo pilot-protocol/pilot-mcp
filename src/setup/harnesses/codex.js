@@ -12,7 +12,7 @@ const CONFIG = join(HOME, '.codex', 'config.toml');
 const BLOCK = `
 [mcp_servers.pilot]
 command = "npx"
-args = ["-y", "pilot-mcp"]
+args = ["-y", "pilotprotocol-mcp"]
 `;
 
 export async function configure() {

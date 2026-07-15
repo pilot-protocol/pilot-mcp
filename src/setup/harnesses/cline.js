@@ -22,6 +22,6 @@ export async function configure() {
   mkdirSync(dirname(settings), { recursive: true });
   const current = existsSync(settings) ? JSON.parse(readFileSync(settings, 'utf8')) : {};
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilot-mcp'] };
+  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
   writeFileSync(settings, JSON.stringify(current, null, 2));
 }
