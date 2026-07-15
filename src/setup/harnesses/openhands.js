@@ -16,7 +16,7 @@ const HOOKS = join(HOME, '.openhands', 'hooks.json');
 const MCP_BLOCK = `
 [mcp.stdio_servers.pilot]
 command = "npx"
-args = ["-y", "pilot-mcp"]
+args = ["-y", "pilotprotocol-mcp"]
 `;
 
 const HOOKS_JSON = {

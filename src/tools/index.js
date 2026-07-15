@@ -4,6 +4,7 @@
 // intent fast. Every tool that maps to a pilotctl command shells out via
 // daemon-bridge.
 
+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { search } from './search.js';
 import { help } from './help.js';
 import { query } from './query.js';
@@ -40,7 +41,7 @@ const TOOLS = [
 ];
 
 export function registerTools(server) {
-  server.setRequestHandler({ method: 'tools/list' }, async () => ({
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOLS.map((t) => ({
       name: t.name,
       description: t.description,
@@ -48,7 +49,7 @@ export function registerTools(server) {
     })),
   }));
 
-  server.setRequestHandler({ method: 'tools/call' }, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const tool = TOOLS.find((t) => t.name === req.params.name);
     if (!tool) {
       return { isError: true, content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }] };

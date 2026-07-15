@@ -4,7 +4,7 @@
 
 ```bash
 # Local (full P2P, your own identity, no third party):
-npx -y pilot-mcp setup
+npx -y pilotprotocol-mcp setup
 
 # Hosted (no install, SSH key = identity, persistent):
 claude mcp add pilot ssh://you@ssh.pilot.protocol.network        # planned v0.2
@@ -16,7 +16,7 @@ Auto-detects Claude Code, Cursor, Cline, OpenClaw, Hermes, OpenHands, Continue.d
 
 | Mode | First call | A2A possible | Privacy | Status |
 |---|---|---|---|---|
-| **Local** (`npx -y pilot-mcp`) | ~1 min — pulls Go daemon, starts it, wires harness | Yes, persistent | Full P2P; no third party sees metadata | v0.1 — shipping now |
+| **Local** (`npx -y pilotprotocol-mcp`) | ~1 min — pulls Go daemon, starts it, wires harness | Yes, persistent | Full P2P; no third party sees metadata | v0.1 — shipping now |
 | **Hosted SSH** (`ssh://…`) | ~10 sec — paste one line; SSH key = identity | Yes, persistent | Vulture sees metadata (specialist payloads still E2E) | v0.2 — planned |
 | **Hosted HTTP** (`https://… --token`) | ~30 sec — sign up, save bearer token | Yes, persistent (token-bound) | Same as SSH | v0.3 — conditional on demand |
 
@@ -91,17 +91,17 @@ Trust + reachability:
 ## Install — one command for everything
 
 ```bash
-npx -y pilot-mcp setup
+npx -y pilotprotocol-mcp setup
 ```
 
 Or per-harness manual:
 
 ```bash
 # Claude Code
-claude mcp add --transport stdio pilot -- npx -y pilot-mcp
+claude mcp add --transport stdio pilot -- npx -y pilotprotocol-mcp
 
 # Cursor — add to ~/.cursor/mcp.json
-{"mcpServers":{"pilot":{"command":"npx","args":["-y","pilot-mcp"]}}}
+{"mcpServers":{"pilot":{"command":"npx","args":["-y", "pilotprotocol-mcp"]}}}
 
 # Cline — add to cline_mcp_settings.json (same JSON)
 
@@ -112,26 +112,26 @@ schema: v1
 mcpServers:
   - name: pilot
     command: npx
-    args: ["-y", "pilot-mcp"]
+    args: ["-y", "pilotprotocol-mcp"]
 
 # OpenHands — add to ~/.openhands/config.toml
 [mcp.stdio_servers.pilot]
 command = "npx"
-args = ["-y", "pilot-mcp"]
+args = ["-y", "pilotprotocol-mcp"]
 
 # Hermes — add to ~/.hermes/config.yaml
 mcp_servers:
   pilot:
     command: npx
-    args: ["-y", "pilot-mcp"]
+    args: ["-y", "pilotprotocol-mcp"]
 
 # Codex CLI — add to ~/.codex/config.toml
 [mcp_servers.pilot]
 command = "npx"
-args = ["-y", "pilot-mcp"]
+args = ["-y", "pilotprotocol-mcp"]
 
 # PicoClaw — add to ~/.picoclaw/config.json
-{"tools":{"mcp":{"servers":{"pilot":{"command":"npx","args":["-y","pilot-mcp"]}}}}}
+{"tools":{"mcp":{"servers":{"pilot":{"command":"npx","args":["-y", "pilotprotocol-mcp"]}}}}}
 ```
 
 ## Privacy

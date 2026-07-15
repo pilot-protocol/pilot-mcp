@@ -17,7 +17,7 @@ export async function configure() {
   if (!existsSync(CONFIG)) return; // OpenClaw not configured yet — caller already skipped
   const current = JSON.parse(readFileSync(CONFIG, 'utf8'));
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilot-mcp'] };
+  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
   writeFileSync(CONFIG, JSON.stringify(current, null, 2));
   // TODO: also recommend (and offer to install) @openclaw/pilot extension for
   // per-turn before_prompt_build injection — that's the cache-friendly path.

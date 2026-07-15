@@ -13,11 +13,11 @@ const CLI_CONFIG = join(HOME, '.junie', 'config.json');
 export async function configure() {
   if (!existsSync(CLI_CONFIG)) {
     mkdirSync(dirname(CLI_CONFIG), { recursive: true });
-    writeFileSync(CLI_CONFIG, JSON.stringify({ mcpServers: { pilot: { command: 'npx', args: ['-y', 'pilot-mcp'] } } }, null, 2));
+    writeFileSync(CLI_CONFIG, JSON.stringify({ mcpServers: { pilot: { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] } } }, null, 2));
     return;
   }
   const current = JSON.parse(readFileSync(CLI_CONFIG, 'utf8'));
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilot-mcp'] };
+  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
   writeFileSync(CLI_CONFIG, JSON.stringify(current, null, 2));
 }

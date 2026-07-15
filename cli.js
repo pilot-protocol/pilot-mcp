@@ -3,7 +3,7 @@
 //
 // Invocation patterns this handles:
 //
-//   pilot-mcp                       → stdio MCP server (used by `npx -y pilot-mcp` in harness configs)
+//   pilot-mcp                       → stdio MCP server (used by `npx -y pilotprotocol-mcp` in harness configs)
 //   pilot-mcp serve --http          → Streamable HTTP MCP server
 //   pilot-mcp setup [flags]         → interactive auto-detect + auto-config wizard
 //   pilot-mcp doctor                → diagnose daemon/registry/harness state
@@ -29,8 +29,8 @@ async function main() {
   // No args = stdio MCP server. This is the universal harness entry point.
   if (!cmd || cmd.startsWith('--')) {
     if (cmd === '--version' || cmd === '-v') {
-      const { version } = await import('./package.json', { with: { type: 'json' } });
-      console.log(version.default);
+      const pkg = (await import('./package.json', { with: { type: 'json' } })).default;
+      console.log(pkg.version);
       return;
     }
     if (cmd === '--help' || cmd === '-h') {

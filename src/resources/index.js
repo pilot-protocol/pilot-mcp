@@ -3,6 +3,7 @@
 // Six read-only resources that surface daemon state without requiring a
 // tool call. Harnesses can poll these for context.
 
+import { ListResourcesRequestSchema, ReadResourceRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { pilotctlJSON } from '../daemon-bridge.js';
 
 const RESOURCES = [
@@ -57,11 +58,11 @@ const RESOURCES = [
 ];
 
 export function registerResources(server) {
-  server.setRequestHandler({ method: 'resources/list' }, async () => ({
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
     resources: RESOURCES.map(({ fetch, ...meta }) => meta),
   }));
 
-  server.setRequestHandler({ method: 'resources/read' }, async (req) => {
+  server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     const r = RESOURCES.find((x) => x.uri === req.params.uri);
     if (!r) throw new Error(`unknown resource: ${req.params.uri}`);
     const data = await r.fetch();

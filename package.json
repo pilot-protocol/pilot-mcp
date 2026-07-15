@@ -1,15 +1,14 @@
 {
-  "name": "pilot-mcp",
+  "name": "pilotprotocol-mcp",
   "version": "0.1.0",
   "description": "Your agent's overlay network. MCP server exposing 436 Pilot specialist agents + P2P A2A messaging. One install configures every harness on your machine.",
   "type": "module",
-  "main": "src/index.js",
+  "main": "cli.js",
   "bin": {
     "pilot-mcp": "cli.js"
   },
   "files": [
     "cli.js",
-    "install.js",
     "src/",
     "README.md",
     "LICENSE",
@@ -19,17 +18,9 @@
     "node": ">=18"
   },
   "scripts": {
-    "postinstall": "node ./install.js",
     "start": "node cli.js",
     "test": "node --test test/",
-    "lint": "eslint src/ cli.js install.js"
-  },
-  "optionalDependencies": {
-    "pilot-mcp-linux-x64": "0.1.0",
-    "pilot-mcp-linux-arm64": "0.1.0",
-    "pilot-mcp-darwin-x64": "0.1.0",
-    "pilot-mcp-darwin-arm64": "0.1.0",
-    "pilot-mcp-win32-x64": "0.1.0"
+    "lint": "eslint src/ cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

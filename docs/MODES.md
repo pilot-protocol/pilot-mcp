@@ -10,7 +10,7 @@ The 16-step current install flow (`curl | sh` + manual daemon-start + manual
 service-load + per-harness wire-up) gates Pilot to people who are already
 sold. Two changes fix that:
 
-1. **Local mode collapses install to one command** — `npx -y pilot-mcp setup`
+1. **Local mode collapses install to one command** — `npx -y pilotprotocol-mcp setup`
    wraps the Go daemon and pilotctl as platform subpackages and auto-configures
    every detected harness.
 2. **Hosted modes eliminate the install commit entirely** — `claude mcp add
@@ -22,7 +22,7 @@ local once they're convinced.
 ## Mode 1 — local (v0.1, shipping)
 
 ```bash
-npx -y pilot-mcp setup
+npx -y pilotprotocol-mcp setup
 ```
 
 What runs: `pilot-mcp` spawns the platform-matched `pilot-daemon` Go binary
