@@ -19,7 +19,7 @@
   },
   "scripts": {
     "start": "node cli.js",
-    "test": "node --test test/",
+    "test": "node --test",
     "lint": "eslint src/ cli.js"
   },
   "dependencies": {
