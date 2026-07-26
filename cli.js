@@ -4,7 +4,6 @@
 // Invocation patterns this handles:
 //
 //   pilot-mcp                       → stdio MCP server (used by `npx -y pilotprotocol-mcp` in harness configs)
-//   pilot-mcp serve --http          → Streamable HTTP MCP server
 //   pilot-mcp setup [flags]         → interactive auto-detect + auto-config wizard
 //   pilot-mcp doctor                → diagnose daemon/registry/harness state
 //   pilot-mcp tour                  → first-run guided demo (one specialist call)
@@ -43,9 +42,11 @@ async function main() {
   }
 
   switch (cmd) {
+    // Undocumented: the HTTP transport is not implemented, so `serve` only
+    // reports that and exits non-zero. Not listed in printHelp().
     case 'serve': {
       const { runHttp } = await import('./src/mcp-http.js');
-      await runHttp(parseFlags(args.slice(1)));
+      await runHttp();
       break;
     }
     case 'setup': {
@@ -108,7 +109,6 @@ function printHelp() {
 
 Usage:
   pilot-mcp                          Start stdio MCP server (default — for harness configs)
-  pilot-mcp serve --http --port N    Start Streamable HTTP MCP server
   pilot-mcp setup                    Auto-detect harnesses and configure each
   pilot-mcp setup --claude --cursor  Configure only specific harnesses
   pilot-mcp setup --all              Non-interactive, configure everything detected

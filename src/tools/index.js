@@ -1,4 +1,4 @@
-// tools/index.js — MCP tool registration. 20 tools total.
+// tools/index.js — MCP tool registration. 21 tools total.
 //
 // Surface organized into 5 buckets so an LLM scanning tools/list can match
 // intent fast. Every tool that maps to a pilotctl command shells out via
@@ -27,7 +27,7 @@ import { broadcast } from './broadcast.js';
 import { publish } from './publish.js';
 import { subscribe } from './subscribe.js';
 
-const TOOLS = [
+export const TOOLS = [
   // Catalog (3-command pattern — specialists auto-trust):
   search, help, query, summary,
   // A2A messaging + file transfer (trust REQUIRED — call pilot_trust_check first):
