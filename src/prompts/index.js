@@ -2,7 +2,7 @@
 
 import { ListPromptsRequestSchema, GetPromptRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
-const PROMPTS = [
+export const PROMPTS = [
   {
     name: 'pilot-trust-readout',
     description: 'Read your current trust state at session start — trusted peers, pending inbound handshakes, recent activity. Call this once early in a session so subsequent peer interactions have context.',

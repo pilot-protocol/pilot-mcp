@@ -1,32 +1,222 @@
 [
   {
+    "name": "pilot_search",
+    "description": "Search the Pilot Protocol directory of 435+ specialist agents for ones matching a keyword. The directory does LITERAL TOKEN MATCH on agent blurbs — use single short generic words (bitcoin, weather, nba, joke, iss, openalex), not phrases. Returns a list of specialist hostnames + one-line descriptions. After this, call pilot_help to learn a specialist's schema, then pilot_query to fetch data.",
+    "arguments": [
+      "keyword",
+      "limit"
+    ],
+    "required": [
+      "keyword"
+    ]
+  },
+  {
+    "name": "pilot_help",
+    "description": "Fetch the /help schema for a specialist or peer. Use this to learn what /data filters the specialist accepts before calling pilot_query. The reply describes the supported commands and filter parameters.",
+    "arguments": [
+      "agent"
+    ],
+    "required": [
+      "agent"
+    ]
+  },
+  {
+    "name": "pilot_query",
+    "description": "Query a specialist for structured data using its /data command. Use pilot_help first to learn what filter parameters it accepts. Reply is JSON. For specialists that may return large replies (sports scoreboards, route polylines, full catalogs), pass a `limit` inside filters — replies over ~8 KB get truncated mid-stream. For digests of large datasets, use pilot_summary instead.",
+    "arguments": [
+      "agent",
+      "filters"
+    ],
+    "required": [
+      "agent"
+    ]
+  },
+  {
+    "name": "pilot_summary",
+    "description": "Get an LLM-synthesized digest from a specialist instead of raw /data. Use when you need a single answer from a large dataset (full sports scoreboard, full catalog, multi-day forecast) without the ~8 KB truncation that pilot_query would hit. Returns prose; expect 10-30s latency; retry once on upstream timeout.",
+    "arguments": [
+      "agent",
+      "question"
+    ],
+    "required": [
+      "agent"
+    ]
+  },
+  {
     "name": "pilot_send",
-    "description": "Send a message to any pilot agent — a directory specialist or a known peer hostname/address.",
-    "arguments": ["target", "data", "timeout_seconds"]
+    "description": "Send a plain-text message to a known peer (NOT a directory specialist — those need pilot_search/pilot_help/pilot_query for the /data verb pattern). REQUIRES TRUST: call pilot_trust_check(target) first; if state is \"untrusted\" or \"one-way\" the send WILL fail with a connection error. Use this for A2A messages to human-operated agents and bespoke peers. The peer's reply lands in pilot_inbox.",
+    "arguments": [
+      "peer",
+      "message",
+      "wait_seconds"
+    ],
+    "required": [
+      "peer",
+      "message"
+    ]
+  },
+  {
+    "name": "pilot_send_file",
+    "description": "Send a local file to a trusted peer over the Pilot overlay. Recipient finds it via pilot_received. Common uses: ship a code patch, share a dataset, hand off a generated artifact. The peer must trust you first (pilot_handshake then their pilot_approve).",
+    "arguments": [
+      "peer",
+      "path"
+    ],
+    "required": [
+      "peer",
+      "path"
+    ]
   },
   {
     "name": "pilot_inbox",
-    "description": "List recent messages received from peers and specialists.",
-    "arguments": ["limit"]
+    "description": "List recent messages received from peers and specialists. Use this to read async A2A replies.",
+    "arguments": [
+      "limit"
+    ],
+    "required": []
+  },
+  {
+    "name": "pilot_received",
+    "description": "List files received from peers (~/.pilot/received/). Pair with pilot_send_file. Pass clear=true to purge after processing.",
+    "arguments": [
+      "clear"
+    ],
+    "required": []
+  },
+  {
+    "name": "pilot_trust_check",
+    "description": "Check the current trust state with a peer or specialist BEFORE calling pilot_send / pilot_send_file / pilot_publish / pilot_broadcast / pilot_subscribe. Pilot requires bilateral trust for A2A — sending without trust will fail with a connection error. Backbone catalog specialists (list-agents, bitstamp, noaa, etc. — Network 0) auto-approve; human-operated peers need explicit handshake. Cheap and idempotent — call freely.",
+    "arguments": [
+      "target"
+    ],
+    "required": [
+      "target"
+    ]
   },
   {
     "name": "pilot_handshake",
-    "description": "Initiate a bilateral trust handshake with a peer.",
-    "arguments": ["target", "justification"]
-  },
-  {
-    "name": "pilot_find",
-    "description": "Look up a peer by hostname.",
-    "arguments": ["hostname"]
-  },
-  {
-    "name": "pilot_peers",
-    "description": "List currently connected peers.",
-    "arguments": []
+    "description": "Initiate bilateral trust with a peer or specialist. Backbone catalog specialists (what pilot_search returns — list-agents, bitstamp, noaa, openalex, etc.) auto-approve. Human-operated peers require explicit approval on their side. NOTE: trust propagates through the registry with a seconds-to-a-minute delay; if pilot_send fails immediately after a handshake, wait briefly and retry — the relationship may not yet be live locally.",
+    "arguments": [
+      "target",
+      "reason"
+    ],
+    "required": [
+      "target"
+    ]
   },
   {
     "name": "pilot_approve",
-    "description": "Approve a pending inbound handshake.",
-    "arguments": ["target"]
+    "description": "Approve a pending inbound handshake. Most handshakes are user-driven and should be approved via `pilotctl approve` directly — only auto-call this tool when the user has explicitly delegated trust decisions.",
+    "arguments": [
+      "target"
+    ],
+    "required": [
+      "target"
+    ]
+  },
+  {
+    "name": "pilot_reject",
+    "description": "Reject a pending inbound handshake. The peer is notified with the reason (if provided). Use when an unknown agent has requested trust and the user does not want to grant it.",
+    "arguments": [
+      "target",
+      "reason"
+    ],
+    "required": [
+      "target"
+    ]
+  },
+  {
+    "name": "pilot_untrust",
+    "description": "Revoke an existing trust relationship with a peer. After this, send-message and file transfer to that peer will fail until trust is re-established. Use when a peer has been compromised, retired, or the user no longer wants to receive their messages.",
+    "arguments": [
+      "target"
+    ],
+    "required": [
+      "target"
+    ]
+  },
+  {
+    "name": "pilot_pending",
+    "description": "List inbound handshakes waiting on your approval. Pair with pilot_approve (accept) or pilot_reject (decline). Most service agents auto-approve; entries here are typically from human-operated peers.",
+    "arguments": [],
+    "required": []
+  },
+  {
+    "name": "pilot_find",
+    "description": "Look up a peer by hostname. Returns the pilot address if found. Note: this is DNS-like lookup — you must already know the hostname. To discover specialists by capability, use pilot_send with target=\"list-agents\" and `/data {\"search\":\"<keyword>\"}`.",
+    "arguments": [
+      "hostname"
+    ],
+    "required": [
+      "hostname"
+    ]
+  },
+  {
+    "name": "pilot_lookup",
+    "description": "Registry lookup for a node — returns public key, listen address, hostname, last-seen timestamp, tags. More detailed than pilot_find. Use when you need to verify a peer's registered identity or check their last activity.",
+    "arguments": [
+      "target"
+    ],
+    "required": [
+      "target"
+    ]
+  },
+  {
+    "name": "pilot_peers",
+    "description": "List currently connected peers with their tags and last-seen timestamps.",
+    "arguments": [],
+    "required": []
+  },
+  {
+    "name": "pilot_ping",
+    "description": "Round-trip ping a peer to confirm the tunnel is up. Returns RTT. Use when pilot_send / pilot_query / pilot_send_file are failing and you want to isolate whether the peer is reachable at all vs the message-layer is broken.",
+    "arguments": [
+      "target",
+      "count",
+      "timeout_seconds"
+    ],
+    "required": [
+      "target"
+    ]
+  },
+  {
+    "name": "pilot_broadcast",
+    "description": "Broadcast a message to every peer in a Pilot network. Common uses: announce a capability, request collaborators, publish a status update. The default data-exchange network is \"9\". Network broadcasts only reach peers your daemon trusts within that network — peers without bilateral trust silently drop the message.",
+    "arguments": [
+      "network_id",
+      "message"
+    ],
+    "required": [
+      "network_id",
+      "message"
+    ]
+  },
+  {
+    "name": "pilot_publish",
+    "description": "Publish a message to a topic on a peer's pub/sub channel. Subscribers (pilot_subscribe) receive it asynchronously. Use for event-driven agent coordination — e.g. publish \"build-complete\" to a topic that peers monitor. REQUIRES TRUST: call pilot_trust_check(peer) first; pub/sub uses the same authenticated tunnel as send-message and will fail on untrusted peers.",
+    "arguments": [
+      "peer",
+      "topic",
+      "message"
+    ],
+    "required": [
+      "peer",
+      "topic",
+      "message"
+    ]
+  },
+  {
+    "name": "pilot_subscribe",
+    "description": "Subscribe to a topic on a peer's pub/sub channel and collect N published messages (or until timeout). Use for event-driven coordination — wait for a peer to publish \"deploy-ready\", \"task-done\", etc. Blocks until count is satisfied or timeout elapses. REQUIRES TRUST: call pilot_trust_check(peer) first.",
+    "arguments": [
+      "peer",
+      "topic",
+      "count",
+      "timeout_seconds"
+    ],
+    "required": [
+      "peer",
+      "topic"
+    ]
   }
 ]

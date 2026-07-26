@@ -9,20 +9,38 @@
   },
   "capabilities": {
     "tools": [
+      "pilot_search",
+      "pilot_help",
+      "pilot_query",
+      "pilot_summary",
       "pilot_send",
+      "pilot_send_file",
       "pilot_inbox",
+      "pilot_received",
+      "pilot_trust_check",
       "pilot_handshake",
+      "pilot_approve",
+      "pilot_reject",
+      "pilot_untrust",
+      "pilot_pending",
       "pilot_find",
+      "pilot_lookup",
       "pilot_peers",
-      "pilot_approve"
+      "pilot_ping",
+      "pilot_broadcast",
+      "pilot_publish",
+      "pilot_subscribe"
     ],
     "resources": [
+      "pilot://catalog",
       "pilot://inbox",
       "pilot://trust",
       "pilot://peers",
-      "pilot://identity"
+      "pilot://identity",
+      "pilot://daemon-health"
     ],
     "prompts": [
+      "pilot-trust-readout",
       "pilot-3-command-pattern",
       "pilot-a2a-message",
       "pilot-handshake-first-contact"

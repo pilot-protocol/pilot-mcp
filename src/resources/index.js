@@ -6,7 +6,7 @@
 import { ListResourcesRequestSchema, ReadResourceRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { pilotctlJSON } from '../daemon-bridge.js';
 
-const RESOURCES = [
+export const RESOURCES = [
   {
     uri: 'pilot://catalog',
     name: 'Directory catalog',

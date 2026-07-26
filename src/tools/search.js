@@ -18,6 +18,48 @@ const KEYWORD_HINTS = {
   fact: ['cat', 'fact', 'advice', 'quote'],
 };
 
+// list-agents replies carry the payload as a JSON string in `data`, shaped:
+//   { tiers: { free: { items: [...], count: N }, ... }, items: [...], count: N, total: N }
+// Top-level `items` mirrors the tier items, so it is only counted when the
+// reply carries no `tiers` object at all.
+export function countMatches(data) {
+  const payload = typeof data === 'string' ? tryParse(data) : data;
+  if (!payload || typeof payload !== 'object') return null;
+
+  if (payload.tiers && typeof payload.tiers === 'object') {
+    let total = 0;
+    let sawItems = false;
+    for (const tier of Object.values(payload.tiers)) {
+      if (tier && Array.isArray(tier.items)) {
+        total += tier.items.length;
+        sawItems = true;
+      }
+    }
+    if (sawItems) return total;
+  }
+  if (Array.isArray(payload.items)) return payload.items.length;
+  return null;
+}
+
+function tryParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+// Attaches the zero-match hint when the reply carries no specialists. A null
+// count means the shape was unrecognized — leave the reply untouched.
+export function annotateSearchResult(result, keyword) {
+  if (!result || typeof result !== 'object') return result;
+  if (countMatches(result.data) === 0) {
+    const hint = Object.values(KEYWORD_HINTS).flat().slice(0, 5).join(', ');
+    result._hint = `No matches for "${keyword}". Try a synonym. Common keywords: ${hint}.`;
+  }
+  return result;
+}
+
 export const search = {
   name: 'pilot_search',
   description:
@@ -40,11 +82,6 @@ export const search = {
       '--data', `/data ${payload}`,
       '--wait',
     ]);
-    // Surface a hint if zero matches — suggest related keywords.
-    if (result?.data?.matches?.length === 0) {
-      const hint = Object.values(KEYWORD_HINTS).flat().slice(0, 5).join(', ');
-      result._hint = `No matches for "${keyword}". Try a synonym. Common keywords: ${hint}.`;
-    }
-    return result;
+    return annotateSearchResult(result, keyword);
   },
 };
