@@ -13,7 +13,8 @@ The package wraps the `pilotctl` Go binary from the Pilot Protocol monorepo.
 For local development you need a running `pilot-daemon`. The fastest way is:
 
 ```bash
-brew tap pilot-protocol/pilot
+brew tap TeoSlayer/pilot
+brew trust TeoSlayer/pilot
 brew install pilotprotocol
 pilotctl daemon start --hostname my-dev-agent --email you@example.com
 ```
