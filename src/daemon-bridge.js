@@ -89,7 +89,8 @@ export async function execPilotctl(args, opts = {}) {
 export async function pilotctlJSON(args) {
   // Wrapper that adds --json and parses the response, with a clear error if
   // pilotctl is missing or daemon isn't reachable.
-  const result = await execPilotctl([...args, '--json'], { capture: true });
+  const governed = withEnterpriseControl(args);
+  const result = await execPilotctl([...governed, '--json'], { capture: true });
   if (result.code !== 0) {
     const hint = result.stderr.includes('socket')
       ? '\nDaemon not running. Run: pilot-mcp setup'
@@ -101,6 +102,26 @@ export async function pilotctlJSON(args) {
   } catch (e) {
     throw new Error(`pilotctl returned non-JSON: ${result.stdout.slice(0, 200)}`);
   }
+}
+
+// withEnterpriseControl is deliberately opt-in. Existing MCP installations
+// produce byte-for-byte equivalent pilotctl arguments unless the host sets
+// PILOT_ENTERPRISE_CONTROL. Message and file operations then use Pilot's real
+// governed dataexchange path; unsupported commands remain unchanged instead
+// of pretending to be controlled.
+export function withEnterpriseControl(args, env = process.env) {
+  const controlPath = String(env.PILOT_ENTERPRISE_CONTROL ?? '').trim();
+  if (!controlPath || !Array.isArray(args) || args.length < 2 || args.includes('--enterprise-control')) {
+    return [...args];
+  }
+  const [command, target] = args;
+  if (command !== 'send-message' && command !== 'send-file') return [...args];
+  const template = String(env.PILOT_GOVERNED_RESOURCE_TEMPLATE ?? 'agent:{target}/inbox').trim();
+  if (!template || !template.includes('{target}')) {
+    throw new Error('PILOT_GOVERNED_RESOURCE_TEMPLATE must contain {target}');
+  }
+  const resource = template.replaceAll('{target}', String(target));
+  return [...args, '--enterprise-control', controlPath, '--governed-resource', resource];
 }
 
 export async function daemonHealthy() {
