@@ -6,6 +6,16 @@ All notable changes to `pilot-mcp` documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-08-07
+
+### Fixed
+- Official MCP Registry publication now installs the checksum-pinned upstream
+  publisher binary and authenticates with GitHub OIDC.
+- npm and Registry metadata are version-locked and carry the required matching
+  `mcpName` ownership marker.
+- Container publication now targets the repository organization's GHCR
+  namespace and runs a reproducible Node 24 production image as a non-root user.
+
 ## [0.2.6] - 2026-08-06
 
 ### Fixed

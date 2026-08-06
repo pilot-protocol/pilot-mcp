@@ -95,13 +95,23 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
       - name: Install mcp-publisher
-        run: npm install -g @modelcontextprotocol/mcp-publisher
-      - name: Publish to Official MCP Registry
-        run: mcp-publisher publish server.json
+        shell: bash
         env:
-          # OIDC token verifies the io.github.<user>/* namespace.
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          MCP_PUBLISHER_VERSION: v1.7.9
+          MCP_PUBLISHER_SHA256: ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          curl --fail --show-error --silent --location \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/${archive}" \
+            --output "${archive}"
+          echo "${MCP_PUBLISHER_SHA256}  ${archive}" | sha256sum --check -
+          tar -xzf "${archive}" mcp-publisher
+          ./mcp-publisher --help >/dev/null
+      - name: Authenticate to Official MCP Registry
+        run: ./mcp-publisher login github-oidc
+      - name: Publish to Official MCP Registry
+        run: ./mcp-publisher publish
 
   docker-publish:
     runs-on: ubuntu-latest
@@ -120,7 +130,7 @@ jobs:
         with:
           push: true
           tags: |
-            ghcr.io/teoslayer/pilot-mcp:latest
-            ghcr.io/teoslayer/pilot-mcp:${{ inputs.tag || github.ref_name }}
+            ghcr.io/pilot-protocol/pilot-mcp:latest
+            ghcr.io/pilot-protocol/pilot-mcp:${{ inputs.tag || github.ref_name }}
           provenance: true
           sbom: true
