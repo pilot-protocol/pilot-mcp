@@ -81,6 +81,13 @@ export async function execPilotctl(args, opts = {}) {
     if (opts.capture) {
       child.stdout.on('data', (b) => { stdout += b.toString(); });
       child.stderr.on('data', (b) => { stderr += b.toString(); });
+      // A short-lived pilotctl may finish before Node flushes stdin. Linux
+      // reports that normal close as EPIPE; without a listener it becomes an
+      // uncaught process error even though the child's exit status and output
+      // are already authoritative.
+      child.stdin.on('error', (error) => {
+        if (error?.code !== 'EPIPE') reject(error);
+      });
       child.stdin.end(opts.input ?? '');
     }
     child.on('error', reject);

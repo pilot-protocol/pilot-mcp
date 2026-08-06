@@ -1,7 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { withEnterpriseControl } from '../src/daemon-bridge.js';
+import { execPilotctl, withEnterpriseControl } from '../src/daemon-bridge.js';
+
+test('captured execution treats a closed child stdin as a normal child result', { concurrency: false }, async () => {
+  const original = process.env.PILOTCTL_BIN;
+  process.env.PILOTCTL_BIN = '/usr/bin/true';
+  try {
+    const result = await execPilotctl([], { capture: true, input: 'x'.repeat(2 * 1024 * 1024) });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
+  } finally {
+    if (original === undefined) delete process.env.PILOTCTL_BIN;
+    else process.env.PILOTCTL_BIN = original;
+  }
+});
 
 test('unconfigured MCP calls preserve existing arguments', () => {
   const args = ['send-message', 'agent-a', '--data', 'hello'];
@@ -38,4 +52,3 @@ test('resource template must be explicit and target-bound', () => {
     PILOT_GOVERNED_RESOURCE_TEMPLATE: 'tenant:alpha/agent:{target}/inbox',
   }).slice(-2), ['--governed-resource', 'tenant:alpha/agent:agent-a/inbox']);
 });
-
