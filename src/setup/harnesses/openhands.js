@@ -17,7 +17,7 @@ const CONFIG = join(HOME, '.openhands', 'config.toml');
 const MCP_BLOCK = `
 [mcp.stdio_servers.pilot]
 command = "npx"
-args = ["-y", "pilotprotocol-mcp"]
+args = ["-y", "pilotprotocol-mcp@0.2.8"]
 `;
 
 export async function configure(options = {}) {

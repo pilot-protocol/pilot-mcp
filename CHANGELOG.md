@@ -6,6 +6,17 @@ All notable changes to `pilot-mcp` documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-08-07
+
+### Added
+- `pilot-mcp attach --<harness>` configures native hooks and MCP for a node
+  already adopted by core Pilot without installing or replacing `pilotctl`,
+  `pilot-daemon`, node identity, or service state.
+
+### Changed
+- Generated hook and MCP commands now pin `pilotprotocol-mcp@0.2.8`, keeping
+  the separately versioned adapter reproducible across the managed fleet.
+
 ## [0.2.7] - 2026-08-07
 
 ### Fixed
