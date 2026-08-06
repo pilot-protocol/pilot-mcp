@@ -15,7 +15,7 @@ const HOOKS = join(HOME, '.codex', 'hooks.json');
 const BLOCK = `
 [mcp_servers.pilot]
 command = "npx"
-args = ["-y", "pilotprotocol-mcp@0.2.8"]
+args = ["-y", "pilotprotocol-mcp@0.2.9"]
 `;
 
 export async function configure() {

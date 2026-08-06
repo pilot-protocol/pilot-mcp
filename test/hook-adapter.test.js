@@ -39,6 +39,31 @@ test('post hook carries the complete tool result and failure category', () => {
   });
 });
 
+test('Gemini pre and post events correlate without a native tool call ID', () => {
+  const common = {
+    session_id: 'gemini-session',
+    transcript_path: '/tmp/session.jsonl',
+    cwd: '/workspace',
+    tool_name: 'mcp_pilot_pilot_send',
+    tool_input: { peer: 'vendor-x', data: 'hello' },
+  };
+  const before = toPilotHookRequest('gemini', 'pre', {
+    ...common, hook_event_name: 'BeforeTool', timestamp: '2026-08-07T00:00:00Z',
+  });
+  const after = toPilotHookRequest('gemini', 'post', {
+    ...common, hook_event_name: 'AfterTool', timestamp: '2026-08-07T00:00:02Z',
+    tool_response: { llmContent: 'sent', returnDisplay: 'sent' },
+  });
+  assert.equal(after.attempt_key, before.attempt_key);
+  assert.equal(after.resume_token, before.resume_token);
+  assert.match(before.attempt_key, /^gemini:gemini-session:content-/);
+
+  const other = toPilotHookRequest('gemini', 'pre', {
+    ...common, hook_event_name: 'BeforeTool', tool_input: { peer: 'vendor-x', data: 'different' },
+  });
+  assert.notEqual(other.attempt_key, before.attempt_key);
+});
+
 test('Pilot MCP calls retain their business action instead of collapsing to tool.invoke', () => {
   assert.deepEqual(mapToolAction('mcp__pilot__pilot_send', { peer: 'vendor-x' }), {
     action: 'data.send.text', resource: 'agent:vendor-x/inbox',
