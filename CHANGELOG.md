@@ -6,6 +6,16 @@ All notable changes to `pilot-mcp` documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-08-07
+
+### Fixed
+- Gemini `BeforeTool` and `AfterTool` events now derive the same correlation
+  key from their stable session, tool, action, resource, and input fields when
+  the harness omits a native tool-call ID. Successful and failed tool results
+  therefore attach to the preflight record instead of producing an evidence
+  gap.
+- Generated hook and MCP commands now pin `pilotprotocol-mcp@0.2.9`.
+
 ## [0.2.8] - 2026-08-07
 
 ### Added

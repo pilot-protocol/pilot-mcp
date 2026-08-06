@@ -23,7 +23,7 @@ export async function configure() {
   mkdirSync(dirname(settings), { recursive: true });
   const current = existsSync(settings) ? JSON.parse(readFileSync(settings, 'utf8')) : {};
   current['github.copilot.chat.mcp.servers'] = current['github.copilot.chat.mcp.servers'] ?? {};
-  current['github.copilot.chat.mcp.servers'].pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.8'] };
+  current['github.copilot.chat.mcp.servers'].pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.9'] };
   writeFileSync(settings, JSON.stringify(current, null, 2));
   installHooks();
 }

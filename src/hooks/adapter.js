@@ -74,10 +74,16 @@ export function toPilotHookRequest(harness, phase, native) {
   const toolName = nativeToolName(harness, native);
   if (!toolName) throw new Error('native hook event is missing tool_name');
   const sessionID = stringValue(native.session_id ?? native.sessionId ?? native.conversation_id ?? 'session');
-  const toolUseID = stringValue(native.tool_use_id ?? native.toolUseId ?? native.call_id ?? native.toolCallId ?? native.extra?.tool_call_id ?? digest(native));
   const eventName = stringValue(native.hook_event_name ?? native.hookEventName ?? native.event_type ?? native.eventName ?? phase);
   const input = parseJSONValue(native.tool_input ?? native.toolInput ?? native.toolArgs ?? native.arguments ?? native.parameters ?? native.preToolUse?.parameters ?? native.params ?? cursorSyntheticInput(native) ?? {});
   const mapped = mapToolAction(toolName, input);
+  const stableResume = digest({ harness, sessionID, toolName, action: mapped.action, resource: mapped.resource, input });
+  const nativeToolUseID = stringValue(native.tool_use_id ?? native.toolUseId ?? native.call_id ?? native.toolCallId ?? native.extra?.tool_call_id);
+  // Gemini's documented BeforeTool/AfterTool schema has no call identifier.
+  // Hash the fields that are stable across both events instead of the full
+  // native payload (which changes event name, timestamp and tool response).
+  // Harnesses that expose a real call ID retain that stronger correlation.
+  const toolUseID = nativeToolUseID || `content-${stableResume}`;
   const requestContent = phase === 'pre'
     ? { tool_name: toolName, tool_input: input }
     : {
@@ -89,7 +95,6 @@ export function toPilotHookRequest(harness, phase, native) {
   if (content.byteLength > MAX_CONTENT_BYTES) {
     throw new Error(`native hook content exceeds ${MAX_CONTENT_BYTES} bytes`);
   }
-  const stableResume = digest({ harness, sessionID, toolName, action: mapped.action, resource: mapped.resource, input });
   return {
     version: 1,
     attempt_key: `${harness}:${sessionID}:${toolUseID}`.slice(0, 1024),
