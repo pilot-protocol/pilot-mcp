@@ -6,6 +6,14 @@ All notable changes to `pilot-mcp` documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-08-06
+
+### Fixed
+- Claude Code setup removes the obsolete `UserPromptSubmit` command that called
+  the nonexistent `heartbeat --claude` subcommand. Existing user and third-party
+  prompt hooks are preserved, while Pilot's native pre/post tool controls remain
+  installed.
+
 ## [0.2.1] - 2026-08-06
 
 ### Fixed
