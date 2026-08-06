@@ -23,7 +23,7 @@ export async function configure() {
   if (!existsSync(CONFIG)) return; // OpenClaw not configured yet — caller already skipped
   const current = JSON.parse(readFileSync(CONFIG, 'utf8'));
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
+  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.8'] };
   writeFileSync(CONFIG, JSON.stringify(current, null, 2));
   mkdirSync(join(HOME, '.pilot', 'integrations'), { recursive: true });
   cpSync(SOURCE_PLUGIN, INSTALLED_PLUGIN, { recursive: true, force: true });

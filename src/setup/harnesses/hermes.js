@@ -21,7 +21,7 @@ export async function configure() {
   }
   document.setIn(['mcp_servers', 'pilot'], {
     command: 'npx',
-    args: ['-y', 'pilotprotocol-mcp'],
+    args: ['-y', 'pilotprotocol-mcp@0.2.8'],
   });
   installHook(document, 'pre_tool_call', 'pre');
   installHook(document, 'post_tool_call', 'post');

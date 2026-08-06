@@ -23,7 +23,7 @@ export async function configure() {
   mkdirSync(dirname(settings), { recursive: true });
   const current = existsSync(settings) ? JSON.parse(readFileSync(settings, 'utf8')) : {};
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
+  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.8'] };
   writeFileSync(settings, JSON.stringify(current, null, 2));
   installNativeHook('PreToolUse', 'pre');
   installNativeHook('PostToolUse', 'post');

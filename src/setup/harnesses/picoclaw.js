@@ -16,7 +16,7 @@ export async function configure() {
   current.tools = current.tools ?? {};
   current.tools.mcp = current.tools.mcp ?? {};
   current.tools.mcp.servers = current.tools.mcp.servers ?? {};
-  current.tools.mcp.servers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
+  current.tools.mcp.servers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.8'] };
   current.hooks = current.hooks ?? {};
   current.hooks.enabled = true;
   current.hooks.defaults = current.hooks.defaults ?? {};
@@ -26,7 +26,7 @@ export async function configure() {
     enabled: true,
     priority: 10,
     transport: 'stdio',
-    command: ['npx', '-y', 'pilotprotocol-mcp', 'picoclaw-hook'],
+    command: ['npx', '-y', 'pilotprotocol-mcp@0.2.8', 'picoclaw-hook'],
     intercept: ['before_tool', 'after_tool'],
   };
   writeFileSync(CONFIG, JSON.stringify(current, null, 2));
