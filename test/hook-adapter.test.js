@@ -68,6 +68,9 @@ test('Pilot MCP calls retain their business action instead of collapsing to tool
   assert.deepEqual(mapToolAction('mcp__pilot__pilot_send', { peer: 'vendor-x' }), {
     action: 'data.send.text', resource: 'agent:vendor-x/inbox',
   });
+  assert.deepEqual(mapToolAction('mcp_pilot_pilot_send', { peer: 'vendor-x' }), {
+    action: 'data.send.text', resource: 'agent:vendor-x/inbox',
+  });
   assert.deepEqual(mapToolAction('pilot_handshake', { target: 'unknown-agent' }), {
     action: 'trust.request', resource: 'agent:unknown-agent',
   });
