@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { execPilotctl } from '../../daemon-bridge.js';
-import { hookCommand, isPilotHookCommand, PILOT_RUNNER } from './runtime.js';
+import { hookCommand, isPilotHookCommand } from './runtime.js';
 
 const HOME = homedir();
 const SETTINGS = join(HOME, '.claude', 'settings.json');
@@ -43,23 +43,32 @@ async function registerMcp() {
 async function installHook() {
   const current = existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, 'utf8')) : {};
   current.hooks = current.hooks ?? {};
-  current.hooks.UserPromptSubmit = current.hooks.UserPromptSubmit ?? [];
-
-  // Only add if not already present (idempotent re-runs).
-  const exists = current.hooks.UserPromptSubmit.some((h) =>
-    h.hooks?.some((x) => x.command?.includes('heartbeat --claude')
-      && (x.command.includes('pilot-mcp') || x.command.includes('pilotprotocol-mcp')))
-  );
-  if (!exists) {
-    current.hooks.UserPromptSubmit.push({
-      matcher: '*',
-      hooks: [{ type: 'command', command: `${PILOT_RUNNER} heartbeat --claude` }],
-    });
-  }
+  removeObsoletePromptHook(current.hooks);
   installToolHook(current.hooks, 'PreToolUse', 'pre');
   installToolHook(current.hooks, 'PostToolUse', 'post');
   installToolHook(current.hooks, 'PostToolUseFailure', 'post');
   writeFileSync(SETTINGS, JSON.stringify(current, null, 2));
+}
+
+// Versions <=0.2.5 installed a UserPromptSubmit entry that invoked the
+// nonexistent `heartbeat --claude` command. Prompt events do not carry a tool
+// name and therefore cannot use the enforcement adapter, whose supported
+// phases are deliberately pre/post tool execution. Remove only that obsolete
+// Pilot command while preserving all user and third-party prompt hooks.
+export function removeObsoletePromptHook(hooks) {
+  const groups = hooks.UserPromptSubmit;
+  if (!Array.isArray(groups)) return;
+  hooks.UserPromptSubmit = groups.flatMap((group) => {
+    if (!Array.isArray(group?.hooks)) return [group];
+    const retained = group.hooks.filter((hook) => !isObsoletePromptCommand(hook?.command));
+    return retained.length > 0 ? [{ ...group, hooks: retained }] : [];
+  });
+  if (hooks.UserPromptSubmit.length === 0) delete hooks.UserPromptSubmit;
+}
+
+function isObsoletePromptCommand(command) {
+  if (typeof command !== 'string') return false;
+  return /(?:^|\s)(?:pilot-mcp|pilotprotocol-mcp)\s+heartbeat\s+--claude(?:\s|$)/.test(command);
 }
 
 function installToolHook(hooks, event, phase) {
