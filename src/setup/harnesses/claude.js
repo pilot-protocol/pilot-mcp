@@ -1,18 +1,20 @@
 // Claude Code: prefer `claude mcp add` CLI; fall back to direct ~/.claude.json edit.
 //
-// Also installs a UserPromptSubmit hook that injects the pilot heartbeat into
-// additionalContext on every turn. This is the per-turn-injection layer that
-// MCP itself cannot deliver (MCP only fires on tools/call).
+// Also installs a complete native tool boundary. PreToolUse runs before
+// Claude's permission-mode checks (including bypassPermissions), while the
+// success/failure post events attach the real result to the same Pilot trace.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { execPilotctl } from '../../daemon-bridge.js';
+import { hookCommand, isPilotHookCommand, PILOT_RUNNER } from './runtime.js';
 
 const HOME = homedir();
 const SETTINGS = join(HOME, '.claude', 'settings.json');
 
 export async function configure() {
+  mkdirSync(dirname(SETTINGS), { recursive: true });
   await registerMcp();
   await installHook();
 }
@@ -45,13 +47,32 @@ async function installHook() {
 
   // Only add if not already present (idempotent re-runs).
   const exists = current.hooks.UserPromptSubmit.some((h) =>
-    h.hooks?.some((x) => x.command?.includes('pilot-mcp heartbeat'))
+    h.hooks?.some((x) => x.command?.includes('heartbeat --claude')
+      && (x.command.includes('pilot-mcp') || x.command.includes('pilotprotocol-mcp')))
   );
   if (!exists) {
     current.hooks.UserPromptSubmit.push({
       matcher: '*',
-      hooks: [{ type: 'command', command: 'pilot-mcp heartbeat --claude' }],
+      hooks: [{ type: 'command', command: `${PILOT_RUNNER} heartbeat --claude` }],
     });
   }
+  installToolHook(current.hooks, 'PreToolUse', 'pre');
+  installToolHook(current.hooks, 'PostToolUse', 'post');
+  installToolHook(current.hooks, 'PostToolUseFailure', 'post');
   writeFileSync(SETTINGS, JSON.stringify(current, null, 2));
+}
+
+function installToolHook(hooks, event, phase) {
+  hooks[event] = hooks[event] ?? [];
+  const command = hookCommand('claude', phase);
+  const existing = hooks[event].flatMap((group) => group.hooks ?? []).find((hook) =>
+    isPilotHookCommand(hook.command, 'claude', phase)
+  );
+  if (existing) {
+    existing.command = command;
+  } else {
+    hooks[event].push({
+      hooks: [{ type: 'command', command, timeout: 30, statusMessage: phase === 'pre' ? 'Checking Pilot policy' : 'Reporting Pilot evidence' }],
+    });
+  }
 }

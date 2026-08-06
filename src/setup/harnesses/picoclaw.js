@@ -1,11 +1,7 @@
-// PicoClaw: write tools.mcp.servers.pilot block into ~/.picoclaw/config.json.
-//
-// SECURITY NOTE: PicoClaw issue #2307 is a process-hook RCE chain via
-// hooks.processes[*].command. We deliberately do NOT write to hooks.processes
-// here — even though that would give per-turn injection — because the hook
-// command surface is the documented RCE vector. If we ever do, the command
-// MUST be a stable audited path (`pilot-mcp heartbeat --picoclaw`), never a
-// user-influenced string.
+// PicoClaw: MCP plus its current JSON-RPC process-hook ABI. The process command
+// is a fixed argv array written by Pilot (never user-influenced shell text).
+// PicoClaw remains pre-1.0, so onboarding reports this as native but
+// experimental until a pinned upstream version passes the denial proof.
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,5 +17,17 @@ export async function configure() {
   current.tools.mcp = current.tools.mcp ?? {};
   current.tools.mcp.servers = current.tools.mcp.servers ?? {};
   current.tools.mcp.servers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
+  current.hooks = current.hooks ?? {};
+  current.hooks.enabled = true;
+  current.hooks.defaults = current.hooks.defaults ?? {};
+  current.hooks.defaults.interceptor_timeout_ms = current.hooks.defaults.interceptor_timeout_ms ?? 30000;
+  current.hooks.processes = current.hooks.processes ?? {};
+  current.hooks.processes.pilot = {
+    enabled: true,
+    priority: 10,
+    transport: 'stdio',
+    command: ['npx', '-y', 'pilotprotocol-mcp', 'picoclaw-hook'],
+    intercept: ['before_tool', 'after_tool'],
+  };
   writeFileSync(CONFIG, JSON.stringify(current, null, 2));
 }

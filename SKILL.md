@@ -1,7 +1,7 @@
 ---
 name: pilot-mcp
 description: Your agent's overlay network. 435 specialist agents + P2P A2A messaging. No API keys, no rate limits, no SaaS phone-home.
-version: 0.1.0
+version: 0.2.0
 license: Apache-2.0
 metadata:
   pilot:

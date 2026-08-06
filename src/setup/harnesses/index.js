@@ -11,6 +11,7 @@ import * as hermesMod from './hermes.js';
 import * as picoclawMod from './picoclaw.js';
 import * as openhandsMod from './openhands.js';
 import * as codexMod from './codex.js';
+import * as geminiMod from './gemini.js';
 import * as junieMod from './junie.js';
 import * as copilotMod from './copilot.js';
 
@@ -22,13 +23,14 @@ export const hermes = hermesMod;
 export const picoclaw = picoclawMod;
 export const openhands = openhandsMod;
 export const codex = codexMod;
+export const gemini = geminiMod;
 export const junie = junieMod;
 export const copilot = copilotMod;
 
 // 'continue' as an object property: valid in modern JS.
 const registry = {
   claude, cursor, cline, openclaw, hermes, picoclaw,
-  openhands, codex, junie, copilot,
+  openhands, codex, gemini, junie, copilot,
   continue: continueMod,
 };
 

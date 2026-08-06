@@ -6,6 +6,8 @@ All notable changes to `pilot-mcp` documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-06
+
 ### Added
 - Scaffold of the `pilot-mcp` package.
 - 6 MCP tools: `pilot_send`, `pilot_inbox`, `pilot_handshake`, `pilot_find`, `pilot_peers`, `pilot_approve`.
@@ -14,12 +16,14 @@ All notable changes to `pilot-mcp` documented here. Format follows
 - `pilot-mcp setup` auto-detect/auto-config wizard for 11 harnesses (Claude Code, Cursor, Cline, Continue.dev, OpenClaw, Hermes, PicoClaw, OpenHands, Codex CLI, Junie, GitHub Copilot).
 - Manifests for marketplace submissions: `.claude-plugin/plugin.json`, `server.json`, `server.yaml`, `tools.json`, `smithery.yaml`, `.well-known/mcp/server-card.json`.
 - GitHub Actions workflow for tag-driven publish to npm + Official MCP Registry + Docker.
+- One-command hosted adoption with a single-use enrollment token, verified signed node identity, and automatic harness attachment.
+- Native pre/post action adapters for supported harnesses, including fail-closed managed preflight behavior.
+- Checksum-verified Pilot runtime bootstrap from the official release manifest on clean macOS and Linux machines.
 
 ### Pending (not yet implemented)
-- Per-platform subpackages with Go binaries.
+- Windows runtime bootstrap and per-platform npm binary subpackages.
 - Streamable HTTP transport (`pilot-mcp serve --http`).
 - `pilot-mcp doctor` diagnostic.
 - `pilot-mcp tour` first-run demo.
-- Tarball download fallback in `install.js`.
-- Daemon service install + load (currently delegates to `pilotctl daemon start`).
+- Privileged system-wide daemon service installation (the managed user runtime is installed and started automatically).
 - Per-turn heartbeat hooks (Claude Code, OpenHands paths sketched).

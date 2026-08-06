@@ -11,11 +11,12 @@ import { homedir } from 'node:os';
 const HOME = homedir();
 const CONFIG = join(HOME, '.pilot', 'config.json');
 
-export async function writeIdentity({ email, hostname }) {
+export async function writeIdentity({ email, hostname, enterpriseControl }) {
   mkdirSync(dirname(CONFIG), { recursive: true });
   const current = existsSync(CONFIG) ? JSON.parse(readFileSync(CONFIG, 'utf8')) : {};
   if (email) current.email = email;
   if (hostname) current.hostname = hostname;
+  if (enterpriseControl) current.enterprise_control = enterpriseControl;
   current.registry = current.registry ?? '34.71.57.205:9000';
   current.beacon = current.beacon ?? '34.71.57.205:9001';
   current.socket = current.socket ?? '/tmp/pilot.sock';

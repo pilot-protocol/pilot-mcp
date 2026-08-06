@@ -1,31 +1,45 @@
-// Hermes: write mcp_servers block into ~/.hermes/config.yaml.
+// Hermes: install Pilot MCP plus the native pre/post shell-hook boundary.
 //
-// Per-turn injection on Hermes requires a separate Python plugin (hermes-pilot)
-// since Hermes deliberately injects pre_llm_call context into the user message
-// (cache-preserving). MCP gets us tool surface; the plugin closes the gap.
-// Gateway-mode Hermes (issue #26596) ignores SOUL.md, so per-turn hook is the
-// only viable injection path there.
+// Hermes runs these command hooks in both CLI and Gateway sessions. Its
+// pre_tool_call response can block execution, but non-zero hook exits do not;
+// the adapter therefore emits Hermes' documented JSON block object.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { parseDocument } from 'yaml';
+import { hookCommand, isPilotHookCommand } from './runtime.js';
 
-const HOME = homedir();
-const CONFIG = join(HOME, '.hermes', 'config.yaml');
+const CONFIG = join(homedir(), '.hermes', 'config.yaml');
 
 export async function configure() {
-  if (!existsSync(CONFIG)) {
-    // No config yet — write a minimal one with the pilot block.
-    writeFileSync(
-      CONFIG,
-      `mcp_servers:\n  pilot:\n    command: npx\n    args:\n      - "-y"\n      - pilot-mcp\n`
-    );
-    return;
+  mkdirSync(dirname(CONFIG), { recursive: true });
+  const source = existsSync(CONFIG) ? readFileSync(CONFIG, 'utf8') : '{}\n';
+  const document = parseDocument(source.trim() ? source : '{}\n');
+  if (document.errors.length) {
+    throw new Error(`cannot merge Hermes YAML: ${document.errors[0].message}`);
   }
-  // Hermes uses YAML; we do a conservative string-level append rather than
-  // depend on a YAML parser at install time. Idempotent: skip if already present.
-  const current = readFileSync(CONFIG, 'utf8');
-  if (current.includes('mcp_servers:') && current.includes('pilot:')) return;
-  const insertion = `\nmcp_servers:\n  pilot:\n    command: npx\n    args:\n      - "-y"\n      - pilot-mcp\n`;
-  writeFileSync(CONFIG, current + insertion);
+  document.setIn(['mcp_servers', 'pilot'], {
+    command: 'npx',
+    args: ['-y', 'pilotprotocol-mcp'],
+  });
+  installHook(document, 'pre_tool_call', 'pre');
+  installHook(document, 'post_tool_call', 'post');
+  writeFileSync(CONFIG, String(document));
+}
+
+function installHook(document, event, phase) {
+  const command = hookCommand('hermes', phase);
+  const node = document.getIn(['hooks', event], true);
+  const entries = node?.toJSON?.() ?? [];
+  if (!Array.isArray(entries)) {
+    throw new Error(`Hermes hooks.${event} must be a sequence`);
+  }
+  const existing = entries.find((entry) => isPilotHookCommand(entry?.command, 'hermes', phase));
+  if (existing) {
+    existing.command = command;
+  } else {
+    entries.push({ matcher: '.*', command, timeout: 30 });
+  }
+  document.setIn(['hooks', event], entries);
 }

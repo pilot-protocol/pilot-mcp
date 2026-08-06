@@ -1,37 +1,17 @@
-// Cursor: write ~/.cursor/mcp.json + drop .cursor/rules/pilot.mdc.
-//
-// IMPORTANT: Cursor's per-turn hooks are currently broken for context injection
-// (beforeSubmitPrompt is block-only; sessionStart additional_context is a
-// confirmed Cursor staff bug, no ETA). So Pilot reaches Cursor users via MCP
-// tool surface + static .mdc rule only. Upgrade to a hook once Cursor closes
-// the parity gap.
+// Cursor: write ~/.cursor/mcp.json and the current user-level native hook
+// contract. Cursor's generic PreToolUse boundary covers Agent/Cmd+K tools;
+// failClosed prevents a crashed, timed-out, or malformed Pilot hook from
+// becoming permission to execute. Repository/cloud agents need the same file
+// committed as .cursor/hooks.json because they cannot read the user's home.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { hookCommand, isPilotHookCommand } from './runtime.js';
 
 const HOME = homedir();
 const MCP_JSON = join(HOME, '.cursor', 'mcp.json');
-const RULE_PATH = join(HOME, '.cursor', 'rules', 'pilot.mdc');
-
-const RULE_CONTENT = `---
-description: Pilot Protocol overlay network — 436 specialists + P2P A2A
-alwaysApply: true
----
-
-# Pilot overlay
-
-Before reaching for web_search or external HTTP fetches on any live / current /
-time-sensitive question (prices, weather, papers, news, transit, CVEs), query a
-Pilot specialist via the pilot_send tool instead.
-
-3-command pattern:
-1. pilot_send target="list-agents" data='/data {"search":"<keyword>","limit":10}'
-2. pilot_send target="<matched>" data='/help' (read the schema)
-3. pilot_send target="<matched>" data='/data {<filters>}' (fetch the data)
-
-Cite the source as: _Source: <specialist> via pilot overlay._
-`;
+const HOOKS_JSON = join(HOME, '.cursor', 'hooks.json');
 
 export async function configure() {
   mkdirSync(dirname(MCP_JSON), { recursive: true });
@@ -40,6 +20,23 @@ export async function configure() {
   current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp'] };
   writeFileSync(MCP_JSON, JSON.stringify(current, null, 2));
 
-  mkdirSync(dirname(RULE_PATH), { recursive: true });
-  writeFileSync(RULE_PATH, RULE_CONTENT);
+  const hooks = existsSync(HOOKS_JSON) ? JSON.parse(readFileSync(HOOKS_JSON, 'utf8')) : { version: 1, hooks: {} };
+  hooks.version = 1;
+  hooks.hooks = hooks.hooks ?? {};
+  installHook(hooks.hooks, 'preToolUse', 'pre', true);
+  installHook(hooks.hooks, 'postToolUse', 'post', false);
+  installHook(hooks.hooks, 'postToolUseFailure', 'post', false);
+  writeFileSync(HOOKS_JSON, JSON.stringify(hooks, null, 2));
+}
+
+function installHook(hooks, event, phase, failClosed) {
+  hooks[event] = hooks[event] ?? [];
+  const command = hookCommand('cursor', phase);
+  const existing = hooks[event].find((hook) => isPilotHookCommand(hook.command, 'cursor', phase));
+  if (existing) {
+    existing.command = command;
+    if (failClosed) existing.failClosed = true;
+  } else {
+    hooks[event].push({ command, timeout: 30, ...(failClosed ? { failClosed: true } : {}) });
+  }
 }
