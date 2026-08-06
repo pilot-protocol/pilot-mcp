@@ -19,6 +19,27 @@ import { pilotctlBinaryPath } from '../daemon-bridge.js';
 
 const DEFAULT_MANIFEST = 'https://pilotprotocol.network/.well-known/latest.json';
 const MAX_RUNTIME_ARCHIVE_BYTES = 128 * 1024 * 1024;
+const MANAGED_RUNTIME = Object.freeze({
+  tag: 'managed-runtime-v0.1.0',
+  platforms: Object.freeze({
+    'darwin-amd64': Object.freeze({
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.0/pilot-darwin-amd64.tar.gz',
+      sha256: 'b2778f3e8b3d50037a16c2d5781b9fcf2c3fcf6835c1c7e2a4065146522c7b50',
+    }),
+    'darwin-arm64': Object.freeze({
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.0/pilot-darwin-arm64.tar.gz',
+      sha256: '8a3ef77081a13dd1474c3d4b4a1e115ccd4457d61a25ca7e096539e08c7a4a9f',
+    }),
+    'linux-amd64': Object.freeze({
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.0/pilot-linux-amd64.tar.gz',
+      sha256: '1886fb566cdfe10300a787e9215606b77e897ed6b7ca8b5cdf85dfba6f5645d4',
+    }),
+    'linux-arm64': Object.freeze({
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.0/pilot-linux-arm64.tar.gz',
+      sha256: '14c79a1520969843cec7dad3630f7a7d0f4864216a4aa1c54f7348c17ea77587',
+    }),
+  }),
+});
 
 export async function ensurePilotRuntime({ requireManaged = false, home = homedir(), fetchImpl = fetch } = {}) {
   let existing = null;
@@ -29,12 +50,17 @@ export async function ensurePilotRuntime({ requireManaged = false, home = homedi
   }
   if (existing && (!requireManaged || supportsManagedAdoption(existing))) return existing;
 
-  const manifestURL = process.env.PILOT_RELEASE_MANIFEST_URL ?? DEFAULT_MANIFEST;
-  const manifest = await fetchJSON(fetchImpl, manifestURL);
-  const release = validateRuntimeManifest(manifest);
+  let release;
+  if (requireManaged) {
+    release = managedRuntimeRelease();
+  } else {
+    const manifestURL = process.env.PILOT_RELEASE_MANIFEST_URL ?? DEFAULT_MANIFEST;
+    const manifest = await fetchJSON(fetchImpl, manifestURL);
+    release = validateRuntimeManifest(manifest);
+  }
   const archive = await fetchBytes(fetchImpl, release.url);
   const digest = createHash('sha256').update(archive).digest('hex');
-  if (digest !== release.sha256) throw new Error('Pilot runtime archive checksum did not match the signed release manifest');
+  if (digest !== release.sha256) throw new Error('Pilot runtime archive checksum did not match the pinned distribution digest');
 
   const pilotRoot = join(home, '.pilot');
   const binDirectory = join(pilotRoot, 'bin');
@@ -96,6 +122,13 @@ export function validateRuntimeManifest(manifest, platform = process.platform, a
     throw new Error(`Pilot release manifest has an invalid runtime for ${key}`);
   }
   return { tag, url: parsed.toString(), sha256 };
+}
+
+export function managedRuntimeRelease(platform = process.platform, arch = process.arch) {
+  const key = runtimePlatformKey(platform, arch);
+  const release = MANAGED_RUNTIME.platforms[key];
+  if (!release) throw new Error(`Pilot does not publish a managed runtime for ${platform}/${arch}`);
+  return { tag: MANAGED_RUNTIME.tag, ...release };
 }
 
 function runtimePlatformKey(platform, arch) {
