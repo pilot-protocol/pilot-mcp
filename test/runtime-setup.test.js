@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateRuntimeManifest } from '../src/setup/runtime.js';
+import { managedRuntimeRelease, validateRuntimeManifest } from '../src/setup/runtime.js';
 
 const digest = 'a'.repeat(64);
 
@@ -28,4 +28,11 @@ test('runtime manifest rejects cross-repository and cross-version substitution',
       latest_stable: 'v1.14.0', platforms: { 'darwin-arm64': { url, sha256: digest } },
     }, 'darwin', 'arm64'), /invalid runtime/);
   }
+});
+
+test('managed setup selects a release asset pinned in the published installer', () => {
+  const release = managedRuntimeRelease('linux', 'x64');
+  assert.equal(release.tag, 'managed-runtime-v0.1.0');
+  assert.match(release.url, /pilot-linux-amd64\.tar\.gz$/);
+  assert.match(release.sha256, /^[a-f0-9]{64}$/);
 });
