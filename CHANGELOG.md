@@ -6,6 +6,16 @@ All notable changes to `pilot-mcp` documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-08-07
+
+### Fixed
+- Gemini-style MCP names such as `mcp_pilot_pilot_send` now map to Pilot's
+  canonical business actions, matching the Claude-style
+  `mcp__pilot__pilot_send` form. Language policies scoped to
+  `data.send.text`, file sharing, and trust operations therefore apply before
+  those Gemini MCP calls execute.
+- Generated hook and MCP commands now pin `pilotprotocol-mcp@0.2.10`.
+
 ## [0.2.9] - 2026-08-07
 
 ### Fixed

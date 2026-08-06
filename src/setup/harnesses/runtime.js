@@ -2,7 +2,7 @@
 // Requiring a separate global install makes onboarding appear successful while
 // the first real tool call fails with "pilot-mcp: command not found".
 
-export const PILOT_RUNNER = 'npx -y pilotprotocol-mcp@0.2.9';
+export const PILOT_RUNNER = 'npx -y pilotprotocol-mcp@0.2.10';
 
 export function hookCommand(harness, phase) {
   return `${PILOT_RUNNER} hook --harness ${harness} --phase ${phase}`;

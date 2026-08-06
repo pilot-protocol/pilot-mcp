@@ -124,7 +124,14 @@ export function toPilotHookRequest(harness, phase, native) {
 export function mapToolAction(toolName, input = {}) {
   const raw = String(toolName);
   const name = raw.toLowerCase();
-  const pilotName = name.split('__').at(-1)?.replaceAll('-', '_');
+  // MCP hosts expose the same server/tool pair with different separators.
+  // Claude-shaped hooks use mcp__pilot__pilot_send while Gemini documents and
+  // emits mcp_pilot_pilot_send. Keep both at the same canonical action.
+  const pilotName = (name.startsWith('mcp__pilot__')
+    ? name.slice('mcp__pilot__'.length)
+    : name.startsWith('mcp_pilot_')
+      ? name.slice('mcp_pilot_'.length)
+      : name.split('__').at(-1))?.replaceAll('-', '_');
   const target = stringValue(input.peer ?? input.target ?? input.agent ?? input.recipient);
   if (pilotName === 'pilot_send') return { action: 'data.send.text', resource: `agent:${target || 'unknown'}/inbox` };
   if (pilotName === 'pilot_send_file') return { action: 'file.share', resource: `agent:${target || 'unknown'}/inbox` };
