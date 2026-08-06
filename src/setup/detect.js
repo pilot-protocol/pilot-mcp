@@ -21,7 +21,9 @@ const PROBES = [
   { id: 'picoclaw',   name: 'PicoClaw',     marker: join(HOME, '.picoclaw') },
   { id: 'openhands',  name: 'OpenHands',    marker: join(HOME, '.openhands') },
   { id: 'codex',      name: 'Codex CLI',    marker: join(HOME, '.codex') },
+  { id: 'gemini',     name: 'Gemini CLI',   marker: join(HOME, '.gemini') },
   { id: 'junie',      name: 'Junie',        marker: join(HOME, '.junie') },
+  { id: 'copilot',    name: 'GitHub Copilot CLI', marker: join(HOME, '.copilot') },
 ];
 
 function clineSettingsPath() {

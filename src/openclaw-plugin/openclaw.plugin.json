@@ -1,0 +1,7 @@
+{
+  "id": "pilot-policy",
+  "name": "Pilot Policy",
+  "version": "0.2.0",
+  "description": "Hosted Pilot pre/post action and outbound-message controls for OpenClaw.",
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

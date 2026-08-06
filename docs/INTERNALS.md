@@ -61,8 +61,8 @@ user prompt on every turn. For the "always check pilot before web_search"
 directive to land every turn, we need per-harness hooks:
 - Claude Code: `UserPromptSubmit` hook in `~/.claude/settings.json`
   (`pilot-mcp heartbeat --claude` returns `additionalContext`)
-- OpenHands: identical Claude Code hook JSON — `HookConfig.load()` accepts it
-  verbatim per the OpenHands SDK source
+- OpenHands: Claude-compatible hook JSON, discovered per repository from
+  `.openhands/hooks.json`; a user-home hook is not fleet-wide enforcement
 - PicoClaw: `hooks.processes.PreMessage` with `inject_output: true` — but ONLY
   via a stable audited binary command (issue #2307 RCE class)
 - OpenClaw: `before_prompt_build` hook from the `@openclaw/pilot` extension

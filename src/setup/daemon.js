@@ -9,19 +9,28 @@
 //     which every daemon joins automatically at registration — no explicit
 //     network-join step is required.
 
-import { spawnSync } from 'node:child_process';
 import { execPilotctl, pilotctlJSON } from '../daemon-bridge.js';
 
-export async function installDaemon({ transport, autoStart }) {
-  // TODO: extract pilot-daemon + pilotctl binaries from the resolved platform
-  // subpackage to ~/.pilot/bin/. Write ~/.pilot/config.json. Write launchd
-  // plist (macOS) / systemd unit (Linux). Load + start it.
-  //
-  // For now: shell out to `pilotctl daemon start` which does an in-process
-  // start. The service-unit-write-and-load is the v0.2 milestone.
+export async function installDaemon({ transport: _transport, autoStart, enterpriseControl }) {
+  // The setup runtime stage has already installed a checksum-verified
+  // pilot-daemon/pilotctl pair under ~/.pilot/bin. pilotctl uses the matching
+  // sibling daemon and either routes through an existing service definition or
+  // starts the user process directly.
 
   if (autoStart) {
-    await execPilotctl(['daemon', 'start']);
+    if (enterpriseControl) {
+      const status = await execPilotctl(['daemon', 'status', '--check'], { capture: true });
+      if (status.code === 0) {
+        const stopped = await execPilotctl(['daemon', 'stop'], { capture: true });
+        if (stopped.code !== 0) throw new Error(`could not restart the existing daemon for managed control: ${stopped.stderr.trim()}`);
+      }
+    }
+    const startArgs = ['daemon', 'start'];
+    if (enterpriseControl) startArgs.push('--enterprise-control', enterpriseControl);
+    const started = await execPilotctl(startArgs, { capture: Boolean(enterpriseControl) });
+    if (enterpriseControl && started.code !== 0) {
+      throw new Error(`managed daemon start failed: ${String(started.stderr || started.stdout).trim()}`);
+    }
   }
 
   // No explicit network-join is needed. The catalog specialists (list-agents

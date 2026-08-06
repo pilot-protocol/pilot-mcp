@@ -33,23 +33,30 @@ function platformKey() {
   throw new Error(`unsupported platform: ${platform}/${arch}`);
 }
 
-export function pilotctlBinaryPath() {
+export function pilotctlBinaryPath(env = process.env) {
+  const explicit = String(env.PILOTCTL_BIN ?? '').trim();
+  if (explicit) {
+    if (!existsSync(explicit)) throw new Error(`PILOTCTL_BIN does not exist: ${explicit}`);
+    return explicit;
+  }
   // First preference: the optionalDependency subpackage installed alongside us.
   const subpkg = join(__dirname, '..', 'node_modules', `pilot-mcp-${platformKey()}`, 'bin', 'pilotctl');
   if (existsSync(subpkg)) return subpkg;
 
-  // Second preference: a system pilotctl on PATH (user installed via brew or
+  // Second preference: the per-user runtime installed by setup. Managed
+  // adoption may deliberately replace an older system binary with a release
+  // that understands the hosted enrollment contract.
+  const legacy = join(homedir(), '.pilot', 'bin', process.platform === 'win32' ? 'pilotctl.exe' : 'pilotctl');
+  if (existsSync(legacy)) return legacy;
+
+  // Third preference: a system pilotctl on PATH (user installed via brew or
   // curl install.sh and we're just providing the MCP shim).
   // Resolve via process.env.PATH lookup.
-  const pathEnv = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
+  const pathEnv = (env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
   for (const dir of pathEnv) {
     const candidate = join(dir, process.platform === 'win32' ? 'pilotctl.exe' : 'pilotctl');
     if (existsSync(candidate)) return candidate;
   }
-
-  // Third preference: ~/.pilot/bin/pilotctl from the legacy install.sh.
-  const legacy = join(homedir(), '.pilot', 'bin', process.platform === 'win32' ? 'pilotctl.exe' : 'pilotctl');
-  if (existsSync(legacy)) return legacy;
 
   throw new Error('pilotctl binary not found. Run `pilot-mcp setup` or install pilot-daemon first.');
 }
@@ -66,7 +73,7 @@ export async function execPilotctl(args, opts = {}) {
   const bin = pilotctlBinaryPath();
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, {
-      stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+      stdio: opts.capture ? ['pipe', 'pipe', 'pipe'] : 'inherit',
       env: { ...process.env, ...(opts.env ?? {}) },
     });
     let stdout = '';
@@ -74,6 +81,7 @@ export async function execPilotctl(args, opts = {}) {
     if (opts.capture) {
       child.stdout.on('data', (b) => { stdout += b.toString(); });
       child.stderr.on('data', (b) => { stderr += b.toString(); });
+      child.stdin.end(opts.input ?? '');
     }
     child.on('error', reject);
     child.on('close', (code) => {
@@ -99,7 +107,7 @@ export async function pilotctlJSON(args) {
   }
   try {
     return JSON.parse(result.stdout);
-  } catch (e) {
+  } catch {
     throw new Error(`pilotctl returned non-JSON: ${result.stdout.slice(0, 200)}`);
   }
 }
@@ -110,7 +118,8 @@ export async function pilotctlJSON(args) {
 // governed dataexchange path; unsupported commands remain unchanged instead
 // of pretending to be controlled.
 export function withEnterpriseControl(args, env = process.env) {
-  const controlPath = String(env.PILOT_ENTERPRISE_CONTROL ?? '').trim();
+  const adoptedPath = join(homedir(), '.pilot', 'managed', 'enterprise-control.json');
+  const controlPath = String(env.PILOT_ENTERPRISE_CONTROL ?? '').trim() || (existsSync(adoptedPath) ? adoptedPath : '');
   if (!controlPath || !Array.isArray(args) || args.length < 2 || args.includes('--enterprise-control')) {
     return [...args];
   }

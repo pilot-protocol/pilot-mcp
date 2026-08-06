@@ -6,6 +6,7 @@
 //   pilot-mcp                       → stdio MCP server (used by `npx -y pilotprotocol-mcp` in harness configs)
 //   pilot-mcp setup [flags]         → interactive auto-detect + auto-config wizard
 //   pilot-mcp doctor                → diagnose daemon/registry/harness state
+//   pilot-mcp hook --harness <id>   → native pre/post tool enforcement bridge
 //   pilot-mcp tour                  → first-run guided demo (one specialist call)
 //   pilot-mcp export-identity       → write identity to portable file
 //   pilot-mcp import-identity <f>   → load identity from portable file
@@ -16,10 +17,6 @@
 // Harnesses spawn this with no TTY; any interactive prompt would deadlock the harness.
 
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 async function main() {
   const args = process.argv.slice(2);
@@ -62,6 +59,16 @@ async function main() {
     case 'tour': {
       const { runTour } = await import('./src/tour.js');
       await runTour();
+      break;
+    }
+    case 'hook': {
+      const { runHook } = await import('./src/hooks/adapter.js');
+      await runHook(parseFlags(args.slice(1)));
+      break;
+    }
+    case 'picoclaw-hook': {
+      const { runPicoClawRPC } = await import('./src/hooks/picoclaw-rpc.js');
+      await runPicoClawRPC();
       break;
     }
     case 'export-identity':
@@ -112,7 +119,10 @@ Usage:
   pilot-mcp setup                    Auto-detect harnesses and configure each
   pilot-mcp setup --claude --cursor  Configure only specific harnesses
   pilot-mcp setup --all              Non-interactive, configure everything detected
+  pilot-mcp setup --managed-url URL  Claim a one-time hosted enrollment from PILOT_ENROLLMENT_TOKEN
   pilot-mcp doctor                   Diagnose daemon/registry/harness state
+  pilot-mcp hook --harness <id>      Native agent pre/post hook bridge (normally auto-installed)
+  pilot-mcp picoclaw-hook             PicoClaw JSON-RPC process hook (normally auto-started)
   pilot-mcp tour                     Guided first-run demo
   pilot-mcp export-identity          Write identity to portable file
   pilot-mcp import-identity <file>   Load identity from portable file

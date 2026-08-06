@@ -1,0 +1,8 @@
+{
+  "name": "@pilotprotocol/openclaw-policy",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "index.js",
+  "openclaw": { "extensions": ["./index.js"] },
+  "peerDependencies": { "openclaw": ">=2026.6.1" }
+}
