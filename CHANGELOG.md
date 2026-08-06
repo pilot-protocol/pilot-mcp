@@ -6,6 +6,12 @@ All notable changes to `pilot-mcp` documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-06
+
+### Fixed
+- Hosted adoption now installs the signed bootstrap policy from the same one-time claim as the delegated node identity, so a fresh node does not require a pre-existing rollout assignment.
+- Managed runtime downloads are pinned to `managed-runtime-v0.1.1` with verified per-platform SHA-256 digests.
+
 ## [0.2.0] - 2026-08-06
 
 ### Added
