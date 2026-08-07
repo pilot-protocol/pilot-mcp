@@ -7,11 +7,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { execPilotctl } from '../../daemon-bridge.js';
-import { hookCommand, isPilotHookCommand } from './runtime.js';
+import { hookCommand, isPilotHookCommand, pilotMcpServer } from './runtime.js';
 
 const HOME = homedir();
 const SETTINGS = join(HOME, '.claude', 'settings.json');
+const MCP_CONFIG = join(HOME, '.claude.json');
 
 export async function configure() {
   mkdirSync(dirname(SETTINGS), { recursive: true });
@@ -20,24 +20,24 @@ export async function configure() {
 }
 
 async function registerMcp() {
-  // Try `claude mcp add` first — works in current Claude Code and properly
-  // updates settings.json with the right schema.
-  try {
-    await execPilotctl([], { capture: true });
-    // claude mcp add --transport stdio pilot -- npx -y pilotprotocol-mcp
-    // Not via pilotctl — shell out to claude itself if on PATH. Skipping the
-    // shell-out skeleton for brevity; the fallback below covers the case
-    // where `claude` isn't on PATH.
-  } catch { /* fall through */ }
-
-  // Direct JSON edit fallback.
-  const current = existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, 'utf8')) : {};
+  // Claude Code stores user-scope MCP servers in ~/.claude.json. Hooks remain
+  // in ~/.claude/settings.json; putting mcpServers there looks plausible but
+  // is not loaded by current Claude Code.
+  const current = existsSync(MCP_CONFIG) ? JSON.parse(readFileSync(MCP_CONFIG, 'utf8')) : {};
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = {
-    command: 'npx',
-    args: ['-y', 'pilotprotocol-mcp@0.2.11'],
-  };
-  writeFileSync(SETTINGS, JSON.stringify(current, null, 2));
+  current.mcpServers.pilot = pilotMcpServer();
+  writeFileSync(MCP_CONFIG, JSON.stringify(current, null, 2));
+
+  // Repair the misplaced entry written by older Pilot releases without
+  // touching any user-owned MCP entry or setting.
+  if (existsSync(SETTINGS)) {
+    const settings = JSON.parse(readFileSync(SETTINGS, 'utf8'));
+    if (settings.mcpServers?.pilot) {
+      delete settings.mcpServers.pilot;
+      if (Object.keys(settings.mcpServers).length === 0) delete settings.mcpServers;
+      writeFileSync(SETTINGS, JSON.stringify(settings, null, 2));
+    }
+  }
 }
 
 async function installHook() {
@@ -68,7 +68,7 @@ export function removeObsoletePromptHook(hooks) {
 
 function isObsoletePromptCommand(command) {
   if (typeof command !== 'string') return false;
-  return /(?:^|\s)(?:pilot-mcp|pilotprotocol-mcp)\s+heartbeat\s+--claude(?:\s|$)/.test(command);
+  return /(?:^|\s)(?:pilot-mcp|pilotprotocol-mcp)(?:@[^\s]+)?\s+heartbeat\s+--claude(?:\s|$)/.test(command);
 }
 
 function installToolHook(hooks, event, phase) {

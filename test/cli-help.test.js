@@ -4,9 +4,10 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const run = promisify(execFile);
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -16,7 +17,39 @@ test('help does not advertise the HTTP transport', async () => {
   const { stdout } = await run(process.execPath, [cli, '--help']);
   assert.doesNotMatch(stdout, /pilot-mcp serve/i, 'help lists `serve`, which is not implemented');
   assert.doesNotMatch(stdout, /--http|Streamable HTTP/i);
+  assert.doesNotMatch(stdout, /uninstall/i, 'help advertises adapter uninstall before it is implemented');
   assert.match(stdout, /Start stdio MCP server/);
+});
+
+test('advertised doctor and tour commands execute against the packaged runtime bridge', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pilot-cli-contract-'));
+  const binary = join(home, 'pilotctl');
+  writeFileSync(binary, '#!/bin/sh\nprintf \'%s\\n\' \'{"data":{"items":[{"hostname":"weather.test"}]}}\'\n');
+  chmodSync(binary, 0o700);
+  const env = { ...process.env, HOME: home, PILOTCTL_BIN: binary, PILOT_SOCKET: join(home, 'missing.sock') };
+  const doctor = await run(process.execPath, [cli, 'doctor', '--json'], { env });
+  const report = JSON.parse(doctor.stdout);
+  assert.equal(report.runtime.ok, true);
+  assert.equal(report.management.attached, false);
+  const tour = await run(process.execPath, [cli, 'tour'], { env });
+  assert.match(tour.stdout, /weather\.test/);
+});
+
+test('identity export and import are real, owner-only lifecycle operations', async () => {
+  const sourceHome = mkdtempSync(join(tmpdir(), 'pilot-identity-source-'));
+  const identityPath = join(sourceHome, '.pilot', 'identity.json');
+  mkdirSync(dirname(identityPath), { recursive: true });
+  writeFileSync(identityPath, '{"node_id":"node-a","private_key":"secret"}\n', { mode: 0o600 });
+  const portable = join(sourceHome, 'portable.json');
+  await run(process.execPath, [cli, 'export-identity', portable], { env: { ...process.env, HOME: sourceHome } });
+  assert.equal(existsSync(portable), true);
+  assert.equal(readFileSync(portable, 'utf8').includes('node-a'), true);
+
+  const targetHome = mkdtempSync(join(tmpdir(), 'pilot-identity-target-'));
+  await run(process.execPath, [cli, 'import-identity', portable], { env: { ...process.env, HOME: targetHome } });
+  const imported = join(targetHome, '.pilot', 'identity.json');
+  assert.deepEqual(JSON.parse(readFileSync(imported, 'utf8')), { node_id: 'node-a', private_key: 'secret' });
+  assert.equal(readFileSync(imported).length > 0, true);
 });
 
 test('serve exits non-zero and says the HTTP transport is unavailable', async () => {

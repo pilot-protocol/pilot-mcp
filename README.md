@@ -101,27 +101,25 @@ npx -y pilotprotocol-mcp setup
 Or per-harness manual:
 
 ```bash
-# Claude Code
+# Claude Code — user MCP lives in ~/.claude.json; hooks live in ~/.claude/settings.json
 claude mcp add --transport stdio pilot -- npx -y pilotprotocol-mcp
 
 # Cursor — add to ~/.cursor/mcp.json
 {"mcpServers":{"pilot":{"command":"npx","args":["-y", "pilotprotocol-mcp"]}}}
 
-# Cline — add to cline_mcp_settings.json (same JSON)
+# Cline — add the same JSON to ~/.cline/data/settings/cline_mcp_settings.json
 
-# Continue.dev — add to .continue/mcpServers/pilot.yaml
-name: Pilot
-version: 0.0.1
+# Continue.dev — merge into ~/.continue/config.yaml
+name: My Continue Config
+version: 1.0.0
 schema: v1
 mcpServers:
-  - name: pilot
+  - name: Pilot
     command: npx
     args: ["-y", "pilotprotocol-mcp"]
 
-# OpenHands — add to ~/.openhands/config.toml
-[mcp.stdio_servers.pilot]
-command = "npx"
-args = ["-y", "pilotprotocol-mcp"]
+# OpenHands — add to ~/.openhands/mcp.json
+{"mcpServers":{"pilot":{"command":"npx","args":["-y","pilotprotocol-mcp"]}}}
 
 # Hermes — add to ~/.hermes/config.yaml
 mcp_servers:
@@ -135,15 +133,27 @@ command = "npx"
 args = ["-y", "pilotprotocol-mcp"]
 
 # PicoClaw — add to ~/.picoclaw/config.json
-{"tools":{"mcp":{"servers":{"pilot":{"command":"npx","args":["-y", "pilotprotocol-mcp"]}}}}}
+{"tools":{"mcp":{"enabled":true,"servers":{"pilot":{"enabled":true,"command":"npx","args":["-y", "pilotprotocol-mcp"]}}}}}
+
+# Copilot CLI — add standard MCP JSON to ~/.copilot/mcp-config.json
+
+# Junie CLI/IDE — add standard MCP JSON to ~/.junie/mcp/mcp.json
+
+# OpenClaw — setup installs and enables the Pilot Policy plugin
+openclaw plugins inspect pilot-policy --runtime --json
 ```
 
-## Privacy
+## Privacy and optional management
 
 - All overlay traffic flows **P2P over encrypted UDP** (AES-256-GCM, X25519 key exchange, Ed25519 identity).
-- No telemetry. No SaaS in the middle. No API key registries.
+- An unmanaged node does not upload tool calls and every installed policy hook
+  is a zero-side-effect pass-through.
 - Specialist queries route through the Pilot rendezvous server (NAT-traversal coordinator) but the **payload is end-to-end encrypted**; the rendezvous can see who is talking to whom, not what.
 - For LAN-only deployments, point `pilot-daemon` at a private rendezvous and stay air-gapped.
+- When a node is explicitly adopted into Pilot Management, its pre/post action
+  envelopes—including tool inputs and results—are sent to the hosted federation
+  control plane for policy evaluation, approvals, and audit. That managed path
+  is opt-in and fail-closed for pre-action decisions.
 
 ## Comparison
 

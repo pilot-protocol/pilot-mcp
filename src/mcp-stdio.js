@@ -17,12 +17,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerTools } from './tools/index.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
+import { VERSION } from './version.js';
 
 export async function runStdio() {
   const server = new Server(
     {
       name: 'pilot-mcp',
-      version: '0.2.1',
+      version: VERSION,
     },
     {
       capabilities: {

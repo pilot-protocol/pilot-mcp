@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import { execPilotctl } from '../daemon-bridge.js';
 
 const MAX_CONTENT_BYTES = 16 << 20;
+const MAX_NATIVE_EVENT_BYTES = MAX_CONTENT_BYTES + (1 << 20);
+const DEFAULT_HOOK_TIMEOUT_MS = 20_000;
 const SUPPORTED_HARNESSES = new Set([
   'claude', 'codex', 'gemini', 'openhands', 'copilot', 'cursor', 'cline', 'hermes',
   'openclaw', 'picoclaw',
@@ -25,9 +27,7 @@ export async function runHook(flags, io = defaultIO()) {
   if (!SUPPORTED_HARNESSES.has(harness)) {
     throw new Error(`unsupported hook harness ${harness || '(missing)'}`);
   }
-  const native = await readNativeEvent(io.stdin);
-  const phase = explicitPhase || eventPhase(native);
-  if (phase !== 'pre' && phase !== 'post') {
+  if (explicitPhase && explicitPhase !== 'pre' && explicitPhase !== 'post') {
     throw new Error('hook phase must be pre or post');
   }
   const configuredPath = String(process.env.PILOT_ENTERPRISE_CONTROL ?? '').trim();
@@ -37,17 +37,25 @@ export async function runHook(flags, io = defaultIO()) {
   // node must behave exactly as it did before setup: no pilotctl dependency,
   // no content upload, no local inspection, and no altered host response.
   if (!controlPath) return { blocked: false, unmanaged: true };
+  const native = await readNativeEvent(io.stdin);
+  const phase = explicitPhase || eventPhase(native);
+  if (phase !== 'pre' && phase !== 'post') {
+    throw new Error('hook phase must be pre or post');
+  }
   const request = toPilotHookRequest(harness, phase, native);
   try {
     const result = await execPilotctl(
       ['enterprise', 'hook', phase, '--control', controlPath, '--json'],
-      { capture: true, input: JSON.stringify(request) },
+      { capture: true, input: JSON.stringify(request), timeoutMs: hookTimeoutMs(), maxBufferBytes: 1 << 20 },
     );
     if (result.code !== 0) {
       throw new Error(cleanPilotctlError(result.stderr, result.stdout));
     }
     const parsed = JSON.parse(result.stdout);
     const response = parsed?.data ?? parsed;
+    if (phase === 'pre' && typeof response?.execute !== 'boolean') {
+      throw new Error('Pilot control plane returned no authoritative execute decision');
+    }
     if (phase === 'pre' && response.execute === false) {
       blockNativeHook(harness, formatBlockReason(response), io);
       return { blocked: true, response };
@@ -73,9 +81,18 @@ export async function runHook(flags, io = defaultIO()) {
 export function toPilotHookRequest(harness, phase, native) {
   const toolName = nativeToolName(harness, native);
   if (!toolName) throw new Error('native hook event is missing tool_name');
-  const sessionID = stringValue(native.session_id ?? native.sessionId ?? native.conversation_id ?? 'session');
-  const eventName = stringValue(native.hook_event_name ?? native.hookEventName ?? native.event_type ?? native.eventName ?? phase);
-  const input = parseJSONValue(native.tool_input ?? native.toolInput ?? native.toolArgs ?? native.arguments ?? native.parameters ?? native.preToolUse?.parameters ?? native.params ?? cursorSyntheticInput(native) ?? {});
+  const sessionID = stringValue(
+    native.session_id ?? native.sessionId ?? native.conversation_id ?? native.taskId ?? native.task_id
+      ?? native.meta?.SessionKey ?? native.meta?.session_key ?? 'session',
+  );
+  const eventName = stringValue(
+    native.hook_event_name ?? native.hookEventName ?? native.event_type ?? native.eventName ?? native.hookName ?? phase,
+  );
+  const input = parseJSONValue(
+    native.tool_input ?? native.toolInput ?? native.toolArgs ?? native.arguments ?? native.parameters
+      ?? native.preToolUse?.parameters ?? native.postToolUse?.parameters ?? native.params
+      ?? cursorSyntheticInput(native) ?? {},
+  );
   const mapped = mapToolAction(toolName, input);
   const stableResume = digest({ harness, sessionID, toolName, action: mapped.action, resource: mapped.resource, input });
   const nativeToolUseID = stringValue(native.tool_use_id ?? native.toolUseId ?? native.call_id ?? native.toolCallId ?? native.extra?.tool_call_id);
@@ -89,7 +106,7 @@ export function toPilotHookRequest(harness, phase, native) {
     : {
         tool_name: toolName,
         tool_input: input,
-        tool_response: parseJSONValue(native.tool_response ?? native.toolResponse ?? native.toolResult ?? native.tool_output ?? native.output ?? native.result ?? native.postToolUse?.result ?? native.extra?.result ?? null),
+        tool_response: nativeToolResponse(native),
       };
   const content = Buffer.from(JSON.stringify(requestContent), 'utf8');
   if (content.byteLength > MAX_CONTENT_BYTES) {
@@ -192,12 +209,19 @@ function compactAttributes(values) {
 
 function postStatus(eventName, native) {
   const name = String(eventName).toLowerCase();
-  if (name.includes('failure') || name.includes('error') || native.success === false || native.error || native.extra?.error) return 'failed';
+  if (
+    name.includes('failure') || name.includes('error')
+    || native.success === false || native.postToolUse?.success === false
+    || native.error || native.error_message || native.errorMessage || native.failure_type
+    || native.postToolUse?.error || native.tool_response?.error || native.extra?.error
+  ) return 'failed';
   return 'succeeded';
 }
 
 function eventPhase(native) {
-  const name = String(native.hook_event_name ?? native.hookEventName ?? native.event_type ?? native.eventName ?? '').toLowerCase();
+  const name = String(
+    native.hook_event_name ?? native.hookEventName ?? native.event_type ?? native.eventName ?? native.hookName ?? '',
+  ).toLowerCase();
   if (name.startsWith('pre') || name.startsWith('before')) return 'pre';
   if (name.startsWith('post') || name.startsWith('after')) return 'post';
   return '';
@@ -237,7 +261,7 @@ function blockNativeHook(harness, reason, io) {
     return;
   }
   if (harness === 'cursor') {
-    io.stdout.write(`${JSON.stringify({ continue: true, permission: 'deny', user_message: reason, agent_message: reason })}\n`);
+    io.stdout.write(`${JSON.stringify({ permission: 'deny', user_message: reason, agent_message: reason })}\n`);
     return;
   }
   io.stderr.write(`${reason}\n`);
@@ -246,10 +270,14 @@ function blockNativeHook(harness, reason, io) {
 
 function nativeToolName(harness, native) {
   const explicit = stringValue(
-    native.tool_name ?? native.toolName ?? native.tool ?? native.preToolUse?.toolName ?? native.postToolUse?.toolName,
+    native.tool_name ?? native.toolName ?? native.tool
+      ?? native.preToolUse?.tool ?? native.preToolUse?.toolName
+      ?? native.postToolUse?.tool ?? native.postToolUse?.toolName,
   );
   if (explicit) return explicit;
-  const event = stringValue(native.hook_event_name ?? native.hookEventName ?? native.event_type ?? native.eventName).toLowerCase();
+  const event = stringValue(
+    native.hook_event_name ?? native.hookEventName ?? native.event_type ?? native.eventName ?? native.hookName,
+  ).toLowerCase();
   if (harness === 'cursor') {
     if (event.includes('shell') || native.command !== undefined) return 'shell';
     if (event.includes('readfile') || native.file_path !== undefined) return 'read_file';
@@ -265,9 +293,56 @@ function cursorSyntheticInput(native) {
   return undefined;
 }
 
+function nativeToolResponse(native) {
+  const result = firstDefined(
+    native.tool_response,
+    native.toolResponse,
+    native.toolResult,
+    native.tool_output,
+    native.output,
+    native.result,
+    native.postToolUse?.result,
+    native.extra?.result,
+  );
+  const failure = compactObject({
+    error: firstDefined(native.error, native.error_message, native.errorMessage, native.postToolUse?.error, native.extra?.error),
+    failure_type: native.failure_type,
+    is_interrupt: native.is_interrupt,
+    success: firstDefined(native.success, native.postToolUse?.success),
+    duration_ms: firstDefined(
+      native.duration_ms, native.durationMs, native.executionTimeMs,
+      native.postToolUse?.durationMs, native.postToolUse?.executionTimeMs, native.extra?.duration_ms,
+    ),
+  });
+  if (Object.keys(failure).length === 0) return parseJSONValue(result ?? null);
+  if (result !== undefined && result !== null) failure.result = parseJSONValue(result);
+  return failure;
+}
+
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined);
+}
+
+function compactObject(values) {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined && value !== null && value !== ''));
+}
+
+function hookTimeoutMs(env = process.env) {
+  const configured = Number(env.PILOT_HOOK_TIMEOUT_MS ?? DEFAULT_HOOK_TIMEOUT_MS);
+  if (!Number.isFinite(configured) || configured < 50 || configured > 25_000) {
+    throw new Error('PILOT_HOOK_TIMEOUT_MS must be between 50 and 25000 milliseconds');
+  }
+  return Math.floor(configured);
+}
+
 async function readNativeEvent(stream) {
   let body = '';
-  for await (const chunk of stream) body += chunk.toString();
+  let bytes = 0;
+  for await (const chunk of stream) {
+    bytes += Buffer.byteLength(chunk);
+    if (bytes > MAX_NATIVE_EVENT_BYTES) throw new Error(`native hook event exceeds ${MAX_NATIVE_EVENT_BYTES} bytes`);
+    body += chunk.toString();
+  }
   if (!body.trim()) throw new Error('native hook event JSON is required on stdin');
   return JSON.parse(body);
 }

@@ -1,4 +1,4 @@
-// OpenHands: write [mcp.stdio_servers.pilot] into ~/.openhands/config.toml.
+// OpenHands: write the current user-level ~/.openhands/mcp.json format.
 //
 // OpenHands accepts Claude Code's hooks.json schema, but discovers it from the
 // repository rather than the user's home directory. `pilot-mcp setup` therefore
@@ -10,26 +10,23 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import process from 'node:process';
 import { hookCommand, isPilotHookCommand } from './runtime.js';
+import { pilotMcpServer } from './runtime.js';
 
 const HOME = homedir();
-const CONFIG = join(HOME, '.openhands', 'config.toml');
-
-const MCP_BLOCK = `
-[mcp.stdio_servers.pilot]
-command = "npx"
-args = ["-y", "pilotprotocol-mcp@0.2.11"]
-`;
+const MCP_CONFIG = join(HOME, '.openhands', 'mcp.json');
+const LEGACY_CONFIG = join(HOME, '.openhands', 'config.toml');
 
 export async function configure(options = {}) {
-  // Append the MCP block if not already present.
-  if (existsSync(CONFIG)) {
-    const current = readFileSync(CONFIG, 'utf8');
-    if (!current.includes('[mcp.stdio_servers.pilot]')) {
-      writeFileSync(CONFIG, current + MCP_BLOCK);
-    }
-  } else {
-    mkdirSync(dirname(CONFIG), { recursive: true });
-    writeFileSync(CONFIG, MCP_BLOCK.trimStart());
+  mkdirSync(dirname(MCP_CONFIG), { recursive: true });
+  const mcp = existsSync(MCP_CONFIG) ? JSON.parse(readFileSync(MCP_CONFIG, 'utf8')) : {};
+  mcp.mcpServers = mcp.mcpServers ?? {};
+  mcp.mcpServers.pilot = pilotMcpServer();
+  writeFileSync(MCP_CONFIG, JSON.stringify(mcp, null, 2));
+
+  if (existsSync(LEGACY_CONFIG)) {
+    const legacy = readFileSync(LEGACY_CONFIG, 'utf8');
+    const migrated = removeLegacyPilotMcpBlock(legacy);
+    if (migrated !== legacy) writeFileSync(LEGACY_CONFIG, migrated);
   }
 
   const workspace = options.cwd ?? process.cwd();
@@ -39,6 +36,22 @@ export async function configure(options = {}) {
   installHook(current, 'PreToolUse', 'pre');
   installHook(current, 'PostToolUse', 'post');
   writeFileSync(hooksPath, JSON.stringify(current, null, 2));
+}
+
+export function removeLegacyPilotMcpBlock(source) {
+  const lines = String(source).split(/(?<=\n)/);
+  const retained = [];
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '[mcp.stdio_servers.pilot]') {
+      skipping = true;
+      continue;
+    }
+    if (skipping && trimmed.startsWith('[')) skipping = false;
+    if (!skipping) retained.push(line);
+  }
+  return retained.join('').replace(/\n{3,}/g, '\n\n');
 }
 
 function installHook(hooks, event, phase) {

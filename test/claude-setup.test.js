@@ -52,3 +52,11 @@ test('ignores similarly named non-Pilot commands', () => {
 
   assert.equal(hooks.UserPromptSubmit.length, 1);
 });
+
+test('removes version-pinned obsolete heartbeat commands', () => {
+  const hooks = {
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.2.5 heartbeat --claude' }] }],
+  };
+  removeObsoletePromptHook(hooks);
+  assert.equal('UserPromptSubmit' in hooks, false);
+});

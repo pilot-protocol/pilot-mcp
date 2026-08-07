@@ -2,7 +2,19 @@
 // Requiring a separate global install makes onboarding appear successful while
 // the first real tool call fails with "pilot-mcp: command not found".
 
-export const PILOT_RUNNER = 'npx -y pilotprotocol-mcp@0.2.11';
+import { PACKAGE_SPEC, VERSION } from '../../version.js';
+
+export const PILOT_PACKAGE_VERSION = VERSION;
+export const PILOT_PACKAGE_SPEC = PACKAGE_SPEC;
+export const PILOT_RUNNER = `npx -y ${PILOT_PACKAGE_SPEC}`;
+
+export function pilotMcpServer(extra = {}) {
+  return {
+    command: 'npx',
+    args: ['-y', PILOT_PACKAGE_SPEC],
+    ...extra,
+  };
+}
 
 export function hookCommand(harness, phase) {
   return `${PILOT_RUNNER} hook --harness ${harness} --phase ${phase}`;

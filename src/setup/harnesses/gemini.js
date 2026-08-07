@@ -3,7 +3,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { hookCommand, isPilotHookCommand } from './runtime.js';
+import { hookCommand, isPilotHookCommand, pilotMcpServer } from './runtime.js';
 
 const SETTINGS = join(homedir(), '.gemini', 'settings.json');
 
@@ -11,7 +11,7 @@ export async function configure() {
   mkdirSync(dirname(SETTINGS), { recursive: true });
   const current = existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, 'utf8')) : {};
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.11'] };
+  current.mcpServers.pilot = pilotMcpServer();
   current.hooksConfig = current.hooksConfig ?? {};
   if (current.hooksConfig.enabled === undefined) current.hooksConfig.enabled = true;
   current.hooks = current.hooks ?? {};

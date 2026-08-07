@@ -8,7 +8,7 @@
 //   5. Install AND load the daemon service (launchd plist / systemd unit).
 //   6. Start daemon, wait for rendezvous registration, fetch pilot address.
 //   7. Auto-detect installed harnesses.
-//   8. For each detected harness: write MCP config + drop SKILL.md/AGENTS.md heartbeat.
+//   8. For each detected harness: write its current MCP config and native policy hooks.
 //   9. Print summary with pilot address and which harnesses were configured.
 //
 // Replaces the current ~16-step new-user journey with one command.

@@ -12,7 +12,6 @@
 //   pilot-mcp tour                  → first-run guided demo (one specialist call)
 //   pilot-mcp export-identity       → write identity to portable file
 //   pilot-mcp import-identity <f>   → load identity from portable file
-//   pilot-mcp uninstall             → reverse setup (remove harness configs, optionally stop daemon)
 //   pilot-mcp <anything-else>       → delegate to the platform pilotctl binary
 //
 // Critical: bare `pilot-mcp` invocation MUST start the stdio server immediately.
@@ -91,7 +90,7 @@ async function main() {
     }
     case 'export-identity':
     case 'import-identity':
-    case 'uninstall': {
+    {
       const { runLifecycle } = await import('./src/lifecycle.js');
       await runLifecycle(cmd, args.slice(1));
       break;
@@ -146,7 +145,6 @@ Usage:
   pilot-mcp tour                     Guided first-run demo
   pilot-mcp export-identity          Write identity to portable file
   pilot-mcp import-identity <file>   Load identity from portable file
-  pilot-mcp uninstall                Reverse setup
   pilot-mcp <cmd>                    Delegate to underlying pilotctl
 
 Common pilotctl commands (auto-delegated):

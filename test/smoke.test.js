@@ -26,11 +26,15 @@ test('stdio server answers initialize with serverInfo', async () => {
   await new Promise((r) => setTimeout(r, 2500));
   p.kill();
   assert.match(out, /"serverInfo"/, `no serverInfo in output: ${out.slice(0, 200)}`);
+  const response = JSON.parse(out.trim().split('\n').find((line) => line.includes('"serverInfo"')));
+  const pkg = JSON.parse(await (await import('node:fs/promises')).readFile(join(root, 'package.json'), 'utf8'));
+  assert.equal(response.result.serverInfo.version, pkg.version);
 });
 
 test('cli --version prints the package version', async () => {
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const { stdout } = await promisify(execFile)(process.execPath, [join(root, 'cli.js'), '--version']);
-  assert.match(stdout.trim(), /^\d+\.\d+\.\d+$/);
+  const pkg = JSON.parse(await (await import('node:fs/promises')).readFile(join(root, 'package.json'), 'utf8'));
+  assert.equal(stdout.trim(), pkg.version);
 });
