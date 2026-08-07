@@ -9,34 +9,43 @@ import { homedir } from 'node:os';
 import { fileURLToPath, URL } from 'node:url';
 import { promisify } from 'node:util';
 
-const HOME = homedir();
-const CONFIG = join(HOME, '.openclaw', 'openclaw.json');
 const SOURCE_PLUGIN = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', 'openclaw-plugin');
-const INSTALLED_PLUGIN = join(HOME, '.pilot', 'integrations', 'openclaw-policy');
 const execFileAsync = promisify(execFile);
 
-export async function configure() {
-  removeObsoleteMcpEntry();
-  mkdirSync(join(HOME, '.pilot', 'integrations'), { recursive: true });
-  cpSync(SOURCE_PLUGIN, INSTALLED_PLUGIN, { recursive: true, force: true });
-  await execFileAsync('openclaw', ['plugins', 'install', '--link', '--force', INSTALLED_PLUGIN], {
-    env: process.env, timeout: 60000, maxBuffer: 1 << 20,
-  });
-  await execFileAsync('openclaw', ['plugins', 'enable', 'pilot-policy'], {
-    env: process.env, timeout: 60000, maxBuffer: 1 << 20,
-  });
-  await execFileAsync('openclaw', ['plugins', 'inspect', 'pilot-policy', '--json'], {
-    env: process.env, timeout: 60000, maxBuffer: 1 << 20,
-  });
+export async function configure(options = {}) {
+  const home = options.home ?? homedir();
+  const config = join(home, '.openclaw', 'openclaw.json');
+  const installedPlugin = join(home, '.pilot', 'integrations', 'openclaw-policy');
+  const execute = options.execFileAsync ?? execFileAsync;
+  removeObsoleteMcpEntry(config);
+  mkdirSync(join(home, '.pilot', 'integrations'), { recursive: true });
+  cpSync(SOURCE_PLUGIN, installedPlugin, { recursive: true, force: true });
+  try {
+    await execute('openclaw', ['plugins', 'install', '--link', '--force', installedPlugin], {
+      env: process.env, timeout: 60000, maxBuffer: 1 << 20,
+    });
+    await execute('openclaw', ['plugins', 'enable', 'pilot-policy'], {
+      env: process.env, timeout: 60000, maxBuffer: 1 << 20,
+    });
+    await execute('openclaw', ['plugins', 'inspect', 'pilot-policy', '--json'], {
+      env: process.env, timeout: 60000, maxBuffer: 1 << 20,
+    });
+  } catch (error) {
+    if (options.allowMissingHost === true && error?.code === 'ENOENT') {
+      return { skipped: true, reason: 'OpenClaw CLI is not installed' };
+    }
+    throw error;
+  }
+  return { skipped: false };
 }
 
-function removeObsoleteMcpEntry() {
-  if (!existsSync(CONFIG)) return;
-  const current = JSON.parse(readFileSync(CONFIG, 'utf8'));
+function removeObsoleteMcpEntry(config) {
+  if (!existsSync(config)) return;
+  const current = JSON.parse(readFileSync(config, 'utf8'));
   if (isPilotMcp(current.mcpServers?.pilot)) {
     delete current.mcpServers.pilot;
     if (Object.keys(current.mcpServers).length === 0) delete current.mcpServers;
-    writeFileSync(CONFIG, JSON.stringify(current, null, 2));
+    writeFileSync(config, JSON.stringify(current, null, 2));
   }
 }
 

@@ -26,17 +26,32 @@ export async function runAttach(flags, options = {}) {
   const selected = selectedHarnesses(flags);
   const writers = options.harnesses ?? harnesses;
   const configured = [];
+  const skipped = [];
   for (const id of selected) {
     const writer = writers[id];
     if (!writer?.configure) throw new Error(`unsupported harness ${id}`);
-    await writer.configure({ id, name: id, transport: 'managed', enterpriseControl: controlPath });
+    const result = await writer.configure({
+      id,
+      name: id,
+      transport: 'managed',
+      enterpriseControl: controlPath,
+      home,
+      allowMissingHost: flags.all === true,
+    });
+    if (result?.skipped === true) {
+      skipped.push({ id, reason: result.reason || 'host is unavailable' });
+      continue;
+    }
     configured.push(id);
   }
 
   const write = options.write ?? ((message) => process.stdout.write(`${message}\n`));
   write(`Attached ${configured.join(', ')} to the existing core Pilot node.`);
+  if (skipped.length > 0) {
+    write(`Skipped ${skipped.map(({ id, reason }) => `${id} (${reason})`).join(', ')}.`);
+  }
   write('Core runtime and node identity were not changed.');
-  return { controlPath, configured };
+  return { controlPath, configured, skipped };
 }
 
 export function selectedHarnesses(flags) {
