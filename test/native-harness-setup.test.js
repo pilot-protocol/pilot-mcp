@@ -20,7 +20,7 @@ test('Cursor setup installs an idempotent fail-closed native tool boundary', () 
   const hooks = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
   assert.equal(hooks.hooks.preToolUse.length, 1);
   assert.equal(hooks.hooks.preToolUse[0].failClosed, true);
-  assert.match(hooks.hooks.preToolUse[0].command, /^npx -y pilotprotocol-mcp@0\.2\.12 /);
+  assert.match(hooks.hooks.preToolUse[0].command, /^npx -y pilotprotocol-mcp@0\.2\.13 /);
   assert.match(hooks.hooks.preToolUse[0].command, /--harness cursor --phase pre/);
 });
 
@@ -29,11 +29,11 @@ test('Cline setup installs current global pre/post hook shims without replacing 
   configureInHome('cline', home);
   const pre = readFileSync(join(home, '.cline', 'hooks', 'PreToolUse'), 'utf8');
   const post = readFileSync(join(home, '.cline', 'hooks', 'PostToolUse'), 'utf8');
-  assert.match(pre, /exec npx -y pilotprotocol-mcp@0\.2\.12 hook/);
+  assert.match(pre, /exec npx -y pilotprotocol-mcp@0\.2\.13 hook/);
   assert.match(pre, /--harness cline --phase pre/);
   assert.match(post, /--harness cline --phase post/);
   const mcp = JSON.parse(readFileSync(join(home, '.cline', 'data', 'settings', 'cline_mcp_settings.json'), 'utf8'));
-  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
 
   const conflictHome = mkdtempSync(join(tmpdir(), 'pilot-cline-conflict-'));
   const target = join(conflictHome, '.cline', 'hooks', 'PreToolUse');
@@ -53,7 +53,7 @@ test('Cline setup emits the only Windows hook filename and PowerShell contract C
     cwd: process.cwd(), env: { ...process.env, HOME: home }, stdio: 'pipe',
   });
   const source = readFileSync(join(home, '.cline', 'hooks', 'PreToolUse.ps1'), 'utf8');
-  assert.match(source, /^& npx -y pilotprotocol-mcp@0\.2\.12 hook --harness cline --phase pre/m);
+  assert.match(source, /^& npx -y pilotprotocol-mcp@0\.2\.13 hook --harness cline --phase pre/m);
   assert.match(source, /LASTEXITCODE/);
 });
 
@@ -64,10 +64,10 @@ test('Copilot setup writes the documented cross-platform command-hook fields', (
   const pre = hooks.hooks.preToolUse[0];
   assert.equal(pre.type, 'command');
   assert.equal(pre.bash, pre.powershell);
-  assert.match(pre.bash, /^npx -y pilotprotocol-mcp@0\.2\.12 /);
+  assert.match(pre.bash, /^npx -y pilotprotocol-mcp@0\.2\.13 /);
   assert.equal(pre.command, undefined);
   const mcp = JSON.parse(readFileSync(join(home, '.copilot', 'mcp-config.json'), 'utf8'));
-  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
 });
 
 test('PicoClaw setup attaches the native process hook as a fixed argv array', () => {
@@ -80,8 +80,18 @@ test('PicoClaw setup attaches the native process hook as a fixed argv array', ()
   const config = JSON.parse(readFileSync(join(home, '.picoclaw', 'config.json'), 'utf8'));
   assert.equal(config.tools.mcp.enabled, true);
   assert.equal(config.tools.mcp.servers.pilot.enabled, true);
-  assert.deepEqual(config.hooks.processes.pilot.command, ['npx', '-y', 'pilotprotocol-mcp@0.2.12', 'picoclaw-hook']);
+  assert.deepEqual(config.hooks.processes.pilot.command, ['npx', '-y', 'pilotprotocol-mcp@0.2.13', 'picoclaw-hook']);
   assert.deepEqual(config.hooks.processes.pilot.intercept, ['before_tool', 'after_tool']);
+});
+
+test('PicoClaw setup never reports a nonexistent installation as configured', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pilot-pico-missing-'));
+  const { configure } = await import('../src/setup/harnesses/picoclaw.js');
+  assert.deepEqual(
+    await configure({ home, allowMissingHost: true }),
+    { skipped: true, reason: 'PicoClaw configuration was not found' },
+  );
+  await assert.rejects(configure({ home }), /PicoClaw configuration was not found/);
 });
 
 test('OpenClaw setup installs the bundled native policy plugin in one pass', () => {
@@ -104,5 +114,27 @@ test('OpenClaw setup installs the bundled native policy plugin in one pass', () 
   assert.match(calls, /plugins\nenable\npilot-policy/);
   assert.match(calls, /plugins\ninspect\npilot-policy\n--json/);
   const manifest = JSON.parse(readFileSync(join(installed, 'openclaw.plugin.json'), 'utf8'));
-  assert.deepEqual(manifest.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(manifest.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
+});
+
+test('OpenClaw setup reports a missing optional host during attach --all', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pilot-openclaw-missing-'));
+  const { configure } = await import('../src/setup/harnesses/openclaw.js');
+  const missingHost = Object.assign(new Error('spawn openclaw ENOENT'), { code: 'ENOENT' });
+  const result = await configure({
+    home,
+    allowMissingHost: true,
+    execFileAsync: async () => { throw missingHost; },
+  });
+
+  assert.deepEqual(result, { skipped: true, reason: 'OpenClaw CLI is not installed' });
+  assert.equal(existsSync(join(home, '.pilot', 'integrations', 'openclaw-policy', 'openclaw.plugin.json')), true);
+
+  await assert.rejects(
+    configure({
+      home: mkdtempSync(join(tmpdir(), 'pilot-openclaw-required-')),
+      execFileAsync: async () => { throw missingHost; },
+    }),
+    /spawn openclaw ENOENT/,
+  );
 });

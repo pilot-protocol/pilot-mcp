@@ -6,6 +6,12 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-08-07
+
+### Fixed
+- `attach --all` skips an unavailable optional OpenClaw host without abandoning every other harness.
+- PicoClaw is only reported as attached when its host configuration exists; explicit PicoClaw attachment now fails precisely instead of silently doing nothing.
+
 ## [0.2.12] - 2026-08-07
 
 ### Fixed

@@ -23,12 +23,12 @@ test('Hermes setup merges native pre/post hooks without replacing existing YAML'
   assert.equal(result.model, 'gemini/example');
   assert.equal(result.hooks.on_session_start[0].command, 'existing-hook');
   assert.equal(result.hooks.pre_tool_call.length, 1);
-  assert.equal(result.hooks.pre_tool_call[0].command, 'npx -y pilotprotocol-mcp@0.2.12 hook --harness hermes --phase pre');
+  assert.equal(result.hooks.pre_tool_call[0].command, 'npx -y pilotprotocol-mcp@0.2.13 hook --harness hermes --phase pre');
   assert.equal(result.hooks.post_tool_call.length, 1);
-  assert.deepEqual(result.mcp_servers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(result.mcp_servers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
   const allowlist = JSON.parse(readFileSync(join(home, '.hermes', 'shell-hooks-allowlist.json'), 'utf8'));
   assert.deepEqual(allowlist.approvals, [
-    { event: 'pre_tool_call', command: 'npx -y pilotprotocol-mcp@0.2.12 hook --harness hermes --phase pre' },
-    { event: 'post_tool_call', command: 'npx -y pilotprotocol-mcp@0.2.12 hook --harness hermes --phase post' },
+    { event: 'pre_tool_call', command: 'npx -y pilotprotocol-mcp@0.2.13 hook --harness hermes --phase pre' },
+    { event: 'post_tool_call', command: 'npx -y pilotprotocol-mcp@0.2.13 hook --harness hermes --phase post' },
   ]);
 });

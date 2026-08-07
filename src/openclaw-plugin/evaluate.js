@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 
-const PACKAGE_SPEC = 'pilotprotocol-mcp@0.2.12';
+const PACKAGE_SPEC = 'pilotprotocol-mcp@0.2.13';
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_STDERR_BYTES = 1 << 20;
 

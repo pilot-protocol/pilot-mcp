@@ -38,7 +38,7 @@ test('Claude separates user MCP registration from hook settings and migrates sta
   configureInHome('claude', home);
 
   const mcp = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
-  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
   assert.equal(settings.theme, 'dark');
   assert.deepEqual(settings.mcpServers, { customer: { command: 'customer-mcp' } });
@@ -54,7 +54,7 @@ test('Gemini uses current MCP and BeforeTool/AfterTool user settings idempotentl
   writeJSON(settingsPath, { mcpServers: { customer: { command: 'customer-mcp' } }, hooks: {} });
   configureInHome('gemini', home);
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-  assert.deepEqual(settings.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(settings.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
   assert.equal(settings.mcpServers.customer.command, 'customer-mcp');
   assert.equal(settings.hooksConfig.enabled, true);
   assert.equal(settings.hooks.BeforeTool.length, 1);
@@ -75,7 +75,7 @@ test('Continue merges Pilot into config.yaml and removes only its obsolete dupli
   const config = parse(source);
   assert.match(source, /# customer config/);
   assert.equal(config.mcpServers.filter((entry) => entry.name === 'Pilot').length, 1);
-  assert.deepEqual(config.mcpServers.find((entry) => entry.name === 'Pilot').args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(config.mcpServers.find((entry) => entry.name === 'Pilot').args, ['-y', 'pilotprotocol-mcp@0.2.13']);
   assert.equal(config.mcpServers.find((entry) => entry.name === 'Customer').command, 'customer-mcp');
   assert.equal(existsSync(legacyPath), false);
 });
@@ -91,7 +91,7 @@ test('OpenHands migrates pre-1.0 TOML MCP config and installs project hooks', ()
   configureInHome('openhands', home, { cwd: workspace });
 
   const mcp = JSON.parse(readFileSync(join(home, '.openhands', 'mcp.json'), 'utf8'));
-  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
   assert.equal(mcp.mcpServers.customer.command, 'customer-mcp');
   const legacy = readFileSync(legacyPath, 'utf8');
   assert.doesNotMatch(legacy, /mcp\.stdio_servers\.pilot/);
@@ -110,7 +110,7 @@ test('Codex upgrades its owned TOML table without duplicating user configuration
   configureInHome('codex', home);
   const config = readFileSync(configPath, 'utf8');
   assert.equal(config.match(/\[mcp_servers\.pilot\]/g)?.length, 1);
-  assert.match(config, /pilotprotocol-mcp@0\.2\.12/);
+  assert.match(config, /pilotprotocol-mcp@0\.2\.13/);
   assert.match(config, /\[mcp_servers\.customer\]/);
   assert.match(config, /model = "customer"/);
   const hooks = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
@@ -122,6 +122,6 @@ test('Junie writes the shared CLI and IDE user MCP location', () => {
   const home = mkdtempSync(join(tmpdir(), 'pilot-junie-contract-'));
   configureInHome('junie', home);
   const config = JSON.parse(readFileSync(join(home, '.junie', 'mcp', 'mcp.json'), 'utf8'));
-  assert.deepEqual(config.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.12']);
+  assert.deepEqual(config.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.2.13']);
   assert.equal(existsSync(join(home, '.junie', 'config.json')), false);
 });

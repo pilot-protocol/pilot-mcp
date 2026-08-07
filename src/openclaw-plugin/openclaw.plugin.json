@@ -8,7 +8,7 @@
     "pilot": {
       "transport": "stdio",
       "command": "npx",
-      "args": ["-y", "pilotprotocol-mcp@0.2.12"]
+      "args": ["-y", "pilotprotocol-mcp@0.2.13"]
     }
   }
 }

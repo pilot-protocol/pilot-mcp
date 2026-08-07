@@ -38,7 +38,7 @@ test('OpenClaw plugin invokes the pinned adapter and preserves the entire event'
   assert.deepEqual(result, { blocked: false });
   assert.equal(observation.command, 'npx');
   assert.deepEqual(observation.args, [
-    '-y', 'pilotprotocol-mcp@0.2.12', 'hook', '--harness', 'openclaw', '--phase', 'pre',
+    '-y', 'pilotprotocol-mcp@0.2.13', 'hook', '--harness', 'openclaw', '--phase', 'pre',
   ]);
   assert.deepEqual(JSON.parse(observation.input), event);
 });

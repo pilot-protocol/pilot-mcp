@@ -8,12 +8,15 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { PILOT_PACKAGE_SPEC, pilotMcpServer } from './runtime.js';
 
-const HOME = homedir();
-const CONFIG = join(HOME, '.picoclaw', 'config.json');
-
-export async function configure() {
-  if (!existsSync(CONFIG)) return;
-  const current = JSON.parse(readFileSync(CONFIG, 'utf8'));
+export async function configure(options = {}) {
+  const config = join(options.home ?? homedir(), '.picoclaw', 'config.json');
+  if (!existsSync(config)) {
+    if (options.allowMissingHost === true) {
+      return { skipped: true, reason: 'PicoClaw configuration was not found' };
+    }
+    throw new Error(`PicoClaw configuration was not found at ${config}`);
+  }
+  const current = JSON.parse(readFileSync(config, 'utf8'));
   current.tools = current.tools ?? {};
   current.tools.mcp = current.tools.mcp ?? {};
   current.tools.mcp.enabled = true;
@@ -31,5 +34,6 @@ export async function configure() {
     command: ['npx', '-y', PILOT_PACKAGE_SPEC, 'picoclaw-hook'],
     intercept: ['before_tool', 'after_tool'],
   };
-  writeFileSync(CONFIG, JSON.stringify(current, null, 2));
+  writeFileSync(config, JSON.stringify(current, null, 2));
+  return { skipped: false };
 }
