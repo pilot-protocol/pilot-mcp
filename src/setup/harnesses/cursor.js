@@ -17,7 +17,7 @@ export async function configure() {
   mkdirSync(dirname(MCP_JSON), { recursive: true });
   const current = existsSync(MCP_JSON) ? JSON.parse(readFileSync(MCP_JSON, 'utf8')) : {};
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.10'] };
+  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.11'] };
   writeFileSync(MCP_JSON, JSON.stringify(current, null, 2));
 
   const hooks = existsSync(HOOKS_JSON) ? JSON.parse(readFileSync(HOOKS_JSON, 'utf8')) : { version: 1, hooks: {} };

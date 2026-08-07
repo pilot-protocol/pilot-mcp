@@ -20,7 +20,7 @@ test('Cursor setup installs an idempotent fail-closed native tool boundary', () 
   const hooks = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
   assert.equal(hooks.hooks.preToolUse.length, 1);
   assert.equal(hooks.hooks.preToolUse[0].failClosed, true);
-  assert.match(hooks.hooks.preToolUse[0].command, /^npx -y pilotprotocol-mcp@0\.2\.10 /);
+  assert.match(hooks.hooks.preToolUse[0].command, /^npx -y pilotprotocol-mcp@0\.2\.11 /);
   assert.match(hooks.hooks.preToolUse[0].command, /--harness cursor --phase pre/);
 });
 
@@ -29,7 +29,7 @@ test('Cline setup installs executable global pre/post hook shims without replaci
   configureInHome('cline', home);
   const pre = readFileSync(join(home, 'Documents', 'Cline', 'Hooks', 'PreToolUse'), 'utf8');
   const post = readFileSync(join(home, 'Documents', 'Cline', 'Hooks', 'PostToolUse'), 'utf8');
-  assert.match(pre, /exec npx -y pilotprotocol-mcp@0\.2\.10 hook/);
+  assert.match(pre, /exec npx -y pilotprotocol-mcp@0\.2\.11 hook/);
   assert.match(pre, /--harness cline --phase pre/);
   assert.match(post, /--harness cline --phase post/);
 
@@ -48,7 +48,7 @@ test('Copilot setup writes the documented cross-platform command-hook fields', (
   const pre = hooks.hooks.preToolUse[0];
   assert.equal(pre.type, 'command');
   assert.equal(pre.bash, pre.powershell);
-  assert.match(pre.bash, /^npx -y pilotprotocol-mcp@0\.2\.10 /);
+  assert.match(pre.bash, /^npx -y pilotprotocol-mcp@0\.2\.11 /);
   assert.equal(pre.command, undefined);
 });
 
@@ -60,7 +60,7 @@ test('PicoClaw setup attaches the native process hook as a fixed argv array', ()
     writeFileSync(target, '{}');
   });
   const config = JSON.parse(readFileSync(join(home, '.picoclaw', 'config.json'), 'utf8'));
-  assert.deepEqual(config.hooks.processes.pilot.command, ['npx', '-y', 'pilotprotocol-mcp@0.2.10', 'picoclaw-hook']);
+  assert.deepEqual(config.hooks.processes.pilot.command, ['npx', '-y', 'pilotprotocol-mcp@0.2.11', 'picoclaw-hook']);
   assert.deepEqual(config.hooks.processes.pilot.intercept, ['before_tool', 'after_tool']);
 });
 

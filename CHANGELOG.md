@@ -1,10 +1,24 @@
 # Changelog
 
-All notable changes to `pilot-mcp` documented here. Format follows
+All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and adheres to
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.2.11] - 2026-08-07
+
+### Fixed
+- The exact obsolete `heartbeat --claude` command now exits successfully and
+  silently while current setup removes it. Machines carrying settings from
+  releases <=0.2.5 therefore no longer reject every Claude Code prompt before
+  the harness is restarted.
+- Security and internals documentation now describe the current pre/post tool
+  enforcement boundary and the separate `pilotprotocol-mcp` npm package.
+- Generated hook and MCP commands now pin `pilotprotocol-mcp@0.2.11`.
+- The compatibility setup path now checksum-pins the installer-compatible
+  public core runtime `managed-runtime-v0.1.5` instead of the superseded
+  `v0.1.2` bundle.
 
 ## [0.2.10] - 2026-08-07
 

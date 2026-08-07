@@ -35,7 +35,7 @@ async function registerMcp() {
   current.mcpServers = current.mcpServers ?? {};
   current.mcpServers.pilot = {
     command: 'npx',
-    args: ['-y', 'pilotprotocol-mcp@0.2.10'],
+    args: ['-y', 'pilotprotocol-mcp@0.2.11'],
   };
   writeFileSync(SETTINGS, JSON.stringify(current, null, 2));
 }

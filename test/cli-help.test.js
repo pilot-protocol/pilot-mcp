@@ -30,6 +30,27 @@ test('serve exits non-zero and says the HTTP transport is unavailable', async ()
   );
 });
 
+test('obsolete Claude heartbeat hook is a silent non-blocking compatibility shim', async () => {
+  const { stdout, stderr } = await run(
+    process.execPath,
+    [cli, 'heartbeat', '--claude'],
+    { input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: 'hello' }) },
+  );
+  assert.strictEqual(stdout, '');
+  assert.strictEqual(stderr, '');
+});
+
+test('legacy heartbeat rejects unsupported invocations', async () => {
+  await assert.rejects(
+    run(process.execPath, [cli, 'heartbeat', '--cursor'], { input: '{}' }),
+    (err) => {
+      assert.strictEqual(err.code, 1);
+      assert.match(err.stderr, /only --claude is supported/i);
+      return true;
+    },
+  );
+});
+
 test('no manifest or source string claims bearer-token auth for the HTTP transport', () => {
   for (const rel of ['src/mcp-http.js', 'cli.js', 'server.json']) {
     const text = readFileSync(join(root, rel), 'utf8');

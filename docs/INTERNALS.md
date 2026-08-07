@@ -54,13 +54,21 @@ from (in order):
 
 If none exist, we surface an MCP error pointing at `pilot-mcp setup`.
 
-## Per-turn injection is NOT MCP's job
+## Native action hooks complement MCP
 
-MCP only fires on `tools/call`. It cannot inject context into the system or
-user prompt on every turn. For the "always check pilot before web_search"
-directive to land every turn, we need per-harness hooks:
-- Claude Code: `UserPromptSubmit` hook in `~/.claude/settings.json`
-  (`pilot-mcp heartbeat --claude` returns `additionalContext`)
+MCP governs only calls routed through Pilot's MCP tools. Where a harness offers
+native interception, setup also installs a pre/post action boundary so Pilot
+can evaluate the exact tool input before execution and retain the result after
+execution. In particular, Claude Code uses `PreToolUse`, `PostToolUse`, and
+`PostToolUseFailure` in `~/.claude/settings.json`.
+
+Releases <=0.2.5 briefly installed a `UserPromptSubmit` heartbeat command that
+never existed. Setup now removes only that obsolete Pilot entry, preserving
+unrelated prompt hooks. The CLI retains the exact historical
+`heartbeat --claude` spelling as a silent compatibility shim so a running
+Claude process with cached settings cannot reject prompts before restart.
+
+Other harness boundaries include:
 - OpenHands: Claude-compatible hook JSON, discovered per repository from
   `.openhands/hooks.json`; a user-home hook is not fleet-wide enforcement
 - PicoClaw: `hooks.processes.PreMessage` with `inject_output: true` — but ONLY
