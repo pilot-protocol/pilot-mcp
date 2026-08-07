@@ -20,23 +20,23 @@ import { pilotctlBinaryPath } from '../daemon-bridge.js';
 const DEFAULT_MANIFEST = 'https://pilotprotocol.network/.well-known/latest.json';
 const MAX_RUNTIME_ARCHIVE_BYTES = 128 * 1024 * 1024;
 const MANAGED_RUNTIME = Object.freeze({
-  tag: 'managed-runtime-v0.1.2',
+  tag: 'managed-runtime-v0.1.5',
   platforms: Object.freeze({
     'darwin-amd64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.2/pilot-darwin-amd64.tar.gz',
-      sha256: '878f5e029424a3726f6ebec4195da619794844bf36487e1c3c8e223cc64a90ff',
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-darwin-amd64.tar.gz',
+      sha256: '0d8bbda818bbfa1df9544fe114353eca097d3f7b7e356c4c5ceac1eaaf3f6d63',
     }),
     'darwin-arm64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.2/pilot-darwin-arm64.tar.gz',
-      sha256: '889217ebcc6ecbef77dd694d0ca553c45688183e1c4db739f215bad0c4f3a2a4',
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-darwin-arm64.tar.gz',
+      sha256: '9df13081c5340f24c18c7941ad964c7c8c67b64d0f7a7fe98eee5043ee2fe915',
     }),
     'linux-amd64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.2/pilot-linux-amd64.tar.gz',
-      sha256: '94f46dff66bd1032d5ce8930d917a7ed9583a03deba4609d9de5f9049acf4fd8',
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-linux-amd64.tar.gz',
+      sha256: '432c04cd27b66e422b5d50778a7f7c220cd20b248348d2fcbad7e0a13e4de498',
     }),
     'linux-arm64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.2/pilot-linux-arm64.tar.gz',
-      sha256: 'e79140e684506b2a244a7e2e0564bee085f5c826bcfbe918ea5e1bb926286c0c',
+      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-linux-arm64.tar.gz',
+      sha256: 'ce873cc9838a7845956028050358f66a33f87af7c8983d2e63065d89104c2181',
     }),
   }),
 });

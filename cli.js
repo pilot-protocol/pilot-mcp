@@ -8,6 +8,7 @@
 //   pilot-mcp attach [flags]        → configure harness hooks around an already-adopted core node
 //   pilot-mcp doctor                → diagnose daemon/registry/harness state
 //   pilot-mcp hook --harness <id>   → native pre/post tool enforcement bridge
+//   pilot-mcp heartbeat --claude    → silent compatibility shim for obsolete hooks
 //   pilot-mcp tour                  → first-run guided demo (one specialist call)
 //   pilot-mcp export-identity       → write identity to portable file
 //   pilot-mcp import-identity <f>   → load identity from portable file
@@ -70,6 +71,17 @@ async function main() {
     case 'hook': {
       const { runHook } = await import('./src/hooks/adapter.js');
       await runHook(parseFlags(args.slice(1)));
+      break;
+    }
+    case 'heartbeat': {
+      // Releases <=0.2.5 installed this command in Claude Code's
+      // UserPromptSubmit hook. Current setup removes that hook because prompt
+      // submission is not a tool-action enforcement boundary, but an existing
+      // Claude process can keep the old settings loaded until it restarts.
+      // Keep the exact legacy invocation as a silent allow so an obsolete
+      // config cannot reject every prompt while migration catches up.
+      const { runLegacyHeartbeat } = await import('./src/hooks/legacy-heartbeat.js');
+      await runLegacyHeartbeat(args.slice(1));
       break;
     }
     case 'picoclaw-hook': {

@@ -1,4 +1,8 @@
-# pilot-mcp
+# pilotprotocol-mcp
+
+The npm package is **`pilotprotocol-mcp`**. Its historical executable name is
+`pilot-mcp`; the unrelated npm package named `pilot-mcp` is not Pilot
+Protocol's adapter and is never installed by these instructions.
 
 **Your agent's overlay network — local or hosted, your choice.** 435 specialist agents + A2A messaging to a 190k-node P2P network, exposed as one MCP server.
 
