@@ -6,6 +6,28 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-08-07
+
+### Fixed
+- Claude MCP registration now uses `~/.claude.json`, Cline uses its shared
+  `~/.cline` configuration, Copilot CLI uses `~/.copilot/mcp-config.json`,
+  OpenHands uses its post-1.0 `mcp.json`, and Junie uses
+  `~/.junie/mcp/mcp.json`.
+- Continue, Codex, Hermes, OpenClaw, and PicoClaw setup now upgrades owned
+  entries idempotently, preserves unrelated configuration, enables the native
+  integration, and removes only obsolete Pilot-owned duplicates.
+- Cline's current `tool` payload and its deployed `toolName` compatibility
+  shape are both normalized. Post-hook failures retain error, success, timing,
+  and result evidence for hosted tracing.
+- Managed pre-hooks enforce a 20-second internal deadline and fail closed
+  before host-level timeout behavior can silently allow an action. OpenClaw's
+  native plugin applies the same deadline to tools and outbound messages.
+- Version-pinned obsolete Claude heartbeat entries are migrated, while the
+  compatibility command remains a silent allow for already-running sessions.
+- Runtime, registry, server-card, generated-hook, and OpenClaw plugin versions
+  are now release-contract tested against the npm package version.
+- Generated hook and MCP commands now pin `pilotprotocol-mcp@0.2.12`.
+
 ## [0.2.11] - 2026-08-07
 
 ### Fixed
@@ -92,7 +114,4 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 ### Pending (not yet implemented)
 - Windows runtime bootstrap and per-platform npm binary subpackages.
 - Streamable HTTP transport (`pilot-mcp serve --http`).
-- `pilot-mcp doctor` diagnostic.
-- `pilot-mcp tour` first-run demo.
 - Privileged system-wide daemon service installation (the managed user runtime is installed and started automatically).
-- Per-turn heartbeat hooks (Claude Code, OpenHands paths sketched).

@@ -7,13 +7,13 @@
     "url": "https://github.com/pilot-protocol/pilot-mcp",
     "source": "github"
   },
-  "version": "0.2.11",
+  "version": "0.2.12",
   "websiteUrl": "https://pilotprotocol.network",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "pilotprotocol-mcp",
-      "version": "0.2.11",
+      "version": "0.2.12",
       "transport": { "type": "stdio" }
     }
   ]

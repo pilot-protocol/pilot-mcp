@@ -27,8 +27,11 @@ const PROBES = [
 ];
 
 function clineSettingsPath() {
-  // Cline lives inside VS Code's per-user storage. Probe both platforms.
+  // Current Cline CLI/IDE/SDK builds share ~/.cline. Keep legacy VS Code
+  // storage probes so an older desktop install is still discovered and
+  // migrated during setup.
   const candidates = [
+    join(HOME, '.cline'),
     join(HOME, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev'),
     join(HOME, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev'),
     join(HOME, 'AppData', 'Roaming', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev'),

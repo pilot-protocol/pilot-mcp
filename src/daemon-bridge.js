@@ -71,27 +71,69 @@ export function daemonSocketPath() {
 
 export async function execPilotctl(args, opts = {}) {
   const bin = pilotctlBinaryPath();
+  const timeoutMs = positiveNumber(opts.timeoutMs, 'timeoutMs');
+  const maxBufferBytes = positiveNumber(opts.maxBufferBytes, 'maxBufferBytes');
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, {
       stdio: opts.capture ? ['pipe', 'pipe', 'pipe'] : 'inherit',
       env: { ...process.env, ...(opts.env ?? {}) },
     });
+    let settled = false;
+    let killTimer;
+    const timer = timeoutMs === null ? null : setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const error = new Error(`pilotctl timed out after ${timeoutMs}ms`);
+      error.code = 'ETIMEDOUT';
+      child.kill();
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 1000);
+      killTimer.unref?.();
+      reject(error);
+    }, timeoutMs);
+    timer?.unref?.();
     let stdout = '';
     let stderr = '';
+    let outputBytes = 0;
     if (opts.capture) {
-      child.stdout.on('data', (b) => { stdout += b.toString(); });
-      child.stderr.on('data', (b) => { stderr += b.toString(); });
+      const append = (channel, chunk) => {
+        if (settled) return;
+        outputBytes += chunk.byteLength;
+        if (maxBufferBytes !== null && outputBytes > maxBufferBytes) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          child.kill();
+          reject(new Error(`pilotctl output exceeds ${maxBufferBytes} bytes`));
+          return;
+        }
+        if (channel === 'stdout') stdout += chunk.toString();
+        else stderr += chunk.toString();
+      };
+      child.stdout.on('data', (chunk) => append('stdout', chunk));
+      child.stderr.on('data', (chunk) => append('stderr', chunk));
       // A short-lived pilotctl may finish before Node flushes stdin. Linux
       // reports that normal close as EPIPE; without a listener it becomes an
       // uncaught process error even though the child's exit status and output
       // are already authoritative.
       child.stdin.on('error', (error) => {
-        if (error?.code !== 'EPIPE') reject(error);
+        if (error?.code !== 'EPIPE' && !settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          reject(error);
+        }
       });
       child.stdin.end(opts.input ?? '');
     }
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       if (opts.capture) {
         resolve({ code: code ?? 0, stdout, stderr });
       } else {
@@ -99,6 +141,13 @@ export async function execPilotctl(args, opts = {}) {
       }
     });
   });
+}
+
+function positiveNumber(value, name) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be a positive number`);
+  return Math.floor(parsed);
 }
 
 export async function pilotctlJSON(args) {

@@ -6,27 +6,48 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { hookCommand, isPilotHookCommand } from './runtime.js';
+import { hookCommand, isPilotHookCommand, PILOT_PACKAGE_SPEC } from './runtime.js';
 
 const HOME = homedir();
 const CONFIG = join(HOME, '.codex', 'config.toml');
 const HOOKS = join(HOME, '.codex', 'hooks.json');
 
-const BLOCK = `
-[mcp_servers.pilot]
-command = "npx"
-args = ["-y", "pilotprotocol-mcp@0.2.11"]
-`;
+function pilotBlock() {
+  return `[mcp_servers.pilot]\ncommand = "npx"\nargs = ["-y", "${PILOT_PACKAGE_SPEC}"]\n`;
+}
 
 export async function configure() {
   if (existsSync(CONFIG)) {
     const current = readFileSync(CONFIG, 'utf8');
-    if (!current.includes('[mcp_servers.pilot]')) writeFileSync(CONFIG, current + BLOCK);
+    writeFileSync(CONFIG, upsertPilotMcpBlock(current));
   } else {
     mkdirSync(dirname(CONFIG), { recursive: true });
-    writeFileSync(CONFIG, BLOCK.trimStart());
+    writeFileSync(CONFIG, pilotBlock());
   }
   installHooks();
+}
+
+export function upsertPilotMcpBlock(source) {
+  const lines = String(source).split(/(?<=\n)/);
+  const retained = [];
+  let replaced = false;
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '[mcp_servers.pilot]') {
+      if (!replaced) retained.push(`${retained.length && !retained.at(-1).endsWith('\n\n') ? '\n' : ''}${pilotBlock()}`);
+      replaced = true;
+      skipping = true;
+      continue;
+    }
+    if (skipping && trimmed.startsWith('[')) skipping = false;
+    if (!skipping) retained.push(line);
+  }
+  if (!replaced) {
+    const separator = retained.length && !retained.join('').endsWith('\n\n') ? '\n' : '';
+    retained.push(`${separator}${pilotBlock()}`);
+  }
+  return retained.join('');
 }
 
 function installHooks() {

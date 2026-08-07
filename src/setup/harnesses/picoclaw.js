@@ -6,6 +6,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { PILOT_PACKAGE_SPEC, pilotMcpServer } from './runtime.js';
 
 const HOME = homedir();
 const CONFIG = join(HOME, '.picoclaw', 'config.json');
@@ -15,8 +16,9 @@ export async function configure() {
   const current = JSON.parse(readFileSync(CONFIG, 'utf8'));
   current.tools = current.tools ?? {};
   current.tools.mcp = current.tools.mcp ?? {};
+  current.tools.mcp.enabled = true;
   current.tools.mcp.servers = current.tools.mcp.servers ?? {};
-  current.tools.mcp.servers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.11'] };
+  current.tools.mcp.servers.pilot = pilotMcpServer({ enabled: true });
   current.hooks = current.hooks ?? {};
   current.hooks.enabled = true;
   current.hooks.defaults = current.hooks.defaults ?? {};
@@ -26,7 +28,7 @@ export async function configure() {
     enabled: true,
     priority: 10,
     transport: 'stdio',
-    command: ['npx', '-y', 'pilotprotocol-mcp@0.2.11', 'picoclaw-hook'],
+    command: ['npx', '-y', PILOT_PACKAGE_SPEC, 'picoclaw-hook'],
     intercept: ['before_tool', 'after_tool'],
   };
   writeFileSync(CONFIG, JSON.stringify(current, null, 2));

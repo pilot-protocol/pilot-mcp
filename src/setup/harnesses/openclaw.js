@@ -1,10 +1,6 @@
-// OpenClaw: defer to the @openclaw/pilot extension if installed; otherwise
-// write a minimal MCP server registration into the user's OpenClaw config.
-//
-// Best path: the openclaw/extensions/pilot channel plugin already exists in
-// the OpenClaw monorepo (TypeScript, registers before_prompt_build hook +
-// channel plugin + 5 tools). That gives per-turn injection plus native channel
-// integration that MCP alone cannot match.
+// OpenClaw: install and enable Pilot's native policy plugin. The plugin manifest
+// owns its MCP server definition, while runtime hooks enforce tools and outbound
+// messages before the host's side effect occurs.
 
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -20,14 +16,32 @@ const INSTALLED_PLUGIN = join(HOME, '.pilot', 'integrations', 'openclaw-policy')
 const execFileAsync = promisify(execFile);
 
 export async function configure() {
-  if (!existsSync(CONFIG)) return; // OpenClaw not configured yet — caller already skipped
-  const current = JSON.parse(readFileSync(CONFIG, 'utf8'));
-  current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.11'] };
-  writeFileSync(CONFIG, JSON.stringify(current, null, 2));
+  removeObsoleteMcpEntry();
   mkdirSync(join(HOME, '.pilot', 'integrations'), { recursive: true });
   cpSync(SOURCE_PLUGIN, INSTALLED_PLUGIN, { recursive: true, force: true });
-  await execFileAsync('openclaw', ['plugins', 'install', '--link', INSTALLED_PLUGIN], {
+  await execFileAsync('openclaw', ['plugins', 'install', '--link', '--force', INSTALLED_PLUGIN], {
     env: process.env, timeout: 60000, maxBuffer: 1 << 20,
   });
+  await execFileAsync('openclaw', ['plugins', 'enable', 'pilot-policy'], {
+    env: process.env, timeout: 60000, maxBuffer: 1 << 20,
+  });
+  await execFileAsync('openclaw', ['plugins', 'inspect', 'pilot-policy', '--json'], {
+    env: process.env, timeout: 60000, maxBuffer: 1 << 20,
+  });
+}
+
+function removeObsoleteMcpEntry() {
+  if (!existsSync(CONFIG)) return;
+  const current = JSON.parse(readFileSync(CONFIG, 'utf8'));
+  if (isPilotMcp(current.mcpServers?.pilot)) {
+    delete current.mcpServers.pilot;
+    if (Object.keys(current.mcpServers).length === 0) delete current.mcpServers;
+    writeFileSync(CONFIG, JSON.stringify(current, null, 2));
+  }
+}
+
+function isPilotMcp(server) {
+  return server?.command === 'npx'
+    && Array.isArray(server.args)
+    && server.args.some((arg) => String(arg).startsWith('pilotprotocol-mcp'));
 }

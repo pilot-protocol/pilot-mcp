@@ -6,18 +6,19 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { pilotMcpServer } from './runtime.js';
 
 const HOME = homedir();
-const CLI_CONFIG = join(HOME, '.junie', 'config.json');
+const CLI_CONFIG = join(HOME, '.junie', 'mcp', 'mcp.json');
 
 export async function configure() {
   if (!existsSync(CLI_CONFIG)) {
     mkdirSync(dirname(CLI_CONFIG), { recursive: true });
-    writeFileSync(CLI_CONFIG, JSON.stringify({ mcpServers: { pilot: { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.11'] } } }, null, 2));
+    writeFileSync(CLI_CONFIG, JSON.stringify({ mcpServers: { pilot: pilotMcpServer() } }, null, 2));
     return;
   }
   const current = JSON.parse(readFileSync(CLI_CONFIG, 'utf8'));
   current.mcpServers = current.mcpServers ?? {};
-  current.mcpServers.pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.11'] };
+  current.mcpServers.pilot = pilotMcpServer();
   writeFileSync(CLI_CONFIG, JSON.stringify(current, null, 2));
 }

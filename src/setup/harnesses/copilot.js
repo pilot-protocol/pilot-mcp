@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
-import { hookCommand, isPilotHookCommand } from './runtime.js';
+import { hookCommand, isPilotHookCommand, pilotMcpServer } from './runtime.js';
 
 const HOME = homedir();
 
@@ -19,13 +19,32 @@ function vsCodeSettingsPath() {
 }
 
 export async function configure() {
-  const settings = vsCodeSettingsPath();
-  mkdirSync(dirname(settings), { recursive: true });
-  const current = existsSync(settings) ? JSON.parse(readFileSync(settings, 'utf8')) : {};
-  current['github.copilot.chat.mcp.servers'] = current['github.copilot.chat.mcp.servers'] ?? {};
-  current['github.copilot.chat.mcp.servers'].pilot = { command: 'npx', args: ['-y', 'pilotprotocol-mcp@0.2.11'] };
-  writeFileSync(settings, JSON.stringify(current, null, 2));
+  const config = join(HOME, '.copilot', 'mcp-config.json');
+  mkdirSync(dirname(config), { recursive: true });
+  const current = existsSync(config) ? JSON.parse(readFileSync(config, 'utf8')) : {};
+  current.mcpServers = current.mcpServers ?? {};
+  current.mcpServers.pilot = pilotMcpServer();
+  writeFileSync(config, JSON.stringify(current, null, 2));
+  removeObsoleteVSCodeEntry();
   installHooks();
+}
+
+function removeObsoleteVSCodeEntry() {
+  const settings = vsCodeSettingsPath();
+  if (!existsSync(settings)) return;
+  let current;
+  try {
+    current = JSON.parse(readFileSync(settings, 'utf8'));
+  } catch {
+    // VS Code settings may be JSONC. Leaving an inert legacy entry is safer
+    // than rewriting a commented user file with a lossy parser.
+    return;
+  }
+  const key = 'github.copilot.chat.mcp.servers';
+  if (!current[key]?.pilot) return;
+  delete current[key].pilot;
+  if (Object.keys(current[key]).length === 0) delete current[key];
+  writeFileSync(settings, JSON.stringify(current, null, 2));
 }
 
 function installHooks() {
