@@ -21,7 +21,9 @@ export async function configure(options = {}) {
   mkdirSync(join(home, '.pilot', 'integrations'), { recursive: true });
   cpSync(SOURCE_PLUGIN, installedPlugin, { recursive: true, force: true });
   try {
-    await execute('openclaw', ['plugins', 'install', '--link', '--force', installedPlugin], {
+    // No --force: OpenClaw rejects it alongside --link, and a linked install already
+    // points at installedPlugin, which the cpSync above just refreshed.
+    await execute('openclaw', ['plugins', 'install', '--link', installedPlugin], {
       env: process.env, timeout: 60000, maxBuffer: 1 << 20,
     });
     await execute('openclaw', ['plugins', 'enable', 'pilot-policy'], {

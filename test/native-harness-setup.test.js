@@ -100,7 +100,19 @@ test('OpenClaw setup installs the bundled native policy plugin in one pass', () 
   const log = join(home, 'openclaw.args');
   mkdirSync(bin, { recursive: true });
   const executable = join(bin, 'openclaw');
-  writeFileSync(executable, `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(log)}\nprintf '%s\\n' -- >> ${JSON.stringify(log)}\n`);
+  // Mirror the real CLI, which rejects --force alongside --link. A permissive stub is
+  // what let the unsupported flag pair ship green.
+  writeFileSync(executable, [
+    '#!/bin/sh',
+    `printf '%s\\n' "$@" >> ${JSON.stringify(log)}`,
+    `printf '%s\\n' -- >> ${JSON.stringify(log)}`,
+    'case " $* " in *" --link "*)',
+    '  case " $* " in *" --force "*)',
+    '    echo "--force is not supported with --link." >&2; exit 1;;',
+    '  esac;;',
+    'esac',
+    '',
+  ].join('\n'));
   chmodSync(executable, 0o700);
   configureInHome('openclaw', home, (dir) => {
     const target = join(dir, '.openclaw', 'openclaw.json');
@@ -110,7 +122,7 @@ test('OpenClaw setup installs the bundled native policy plugin in one pass', () 
   const installed = join(home, '.pilot', 'integrations', 'openclaw-policy');
   assert.equal(existsSync(join(installed, 'openclaw.plugin.json')), true);
   const calls = readFileSync(log, 'utf8');
-  assert.match(calls, /plugins\ninstall\n--link\n--force/);
+  assert.match(calls, /plugins\ninstall\n--link\n[^\n]*openclaw-policy/);
   assert.match(calls, /plugins\nenable\npilot-policy/);
   assert.match(calls, /plugins\ninspect\npilot-policy\n--json/);
   const manifest = JSON.parse(readFileSync(join(installed, 'openclaw.plugin.json'), 'utf8'));
