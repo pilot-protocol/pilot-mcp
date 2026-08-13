@@ -16,17 +16,44 @@ test('stdio server answers initialize with serverInfo', async () => {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let out = '';
-  p.stdout.on('data', (d) => { out += d; });
+  let errOut = '';
+  p.stderr.on('data', (d) => { errOut += d; });
   const req = JSON.stringify({
     jsonrpc: '2.0', id: 1, method: 'initialize',
     params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke', version: '0' } },
   }) + '\n';
-  await new Promise((r) => setTimeout(r, 500));
-  p.stdin.write(req);
-  await new Promise((r) => setTimeout(r, 2500));
+  await new Promise((resolve, reject) => {
+    p.stdin.write(req, (error) => error ? reject(error) : resolve());
+  });
+  const responseLine = await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      p.stdout.off('data', onData);
+      p.off('error', onError);
+      p.off('exit', onExit);
+    };
+    const finish = (fn, value) => {
+      cleanup();
+      fn(value);
+    };
+    const onData = (d) => {
+      out += d;
+      const line = out.split('\n').find((candidate) => candidate.includes('"serverInfo"'));
+      if (line) finish(resolve, line);
+    };
+    const onError = (error) => finish(reject, error);
+    const onExit = (code, signal) => finish(reject, new Error(
+      `MCP server exited before initialize response (code=${code}, signal=${signal}, stderr=${errOut.slice(0, 200)})`,
+    ));
+    const timer = setTimeout(() => finish(reject, new Error(
+      `no serverInfo within 10s; stdout=${out.slice(0, 200)} stderr=${errOut.slice(0, 200)}`,
+    )), 10_000);
+    p.stdout.on('data', onData);
+    p.once('error', onError);
+    p.once('exit', onExit);
+  });
   p.kill();
-  assert.match(out, /"serverInfo"/, `no serverInfo in output: ${out.slice(0, 200)}`);
-  const response = JSON.parse(out.trim().split('\n').find((line) => line.includes('"serverInfo"')));
+  const response = JSON.parse(responseLine);
   const pkg = JSON.parse(await (await import('node:fs/promises')).readFile(join(root, 'package.json'), 'utf8'));
   assert.equal(response.result.serverInfo.version, pkg.version);
 });
