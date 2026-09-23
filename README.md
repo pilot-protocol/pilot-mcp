@@ -152,13 +152,21 @@ there, as a normal user or as root, and needs no systemd or launchd:
 
 - The release manifest and runtime archive download through the proxy
   (`CONNECT` by hostname, TLS end-to-end, SHA-256 still verified). Proxy
-  selection matches `pilot-daemon -proxy`: the first non-empty of
-  `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy` (plain `http://` uses
-  `HTTP_PROXY`/`http_proxy` first), with `NO_PROXY`/`no_proxy` honoured and
-  localhost/loopback never proxied. `PILOT_PROXY=off` (or `none`, `false`,
-  `direct`) disables the proxy and `PILOT_PROXY=[http://]host:port` forces one.
-  A value that is not a usable http(s) proxy is ignored with a warning; it
-  never stops setup.
+  selection is the same as `pilot-daemon -proxy` (common/netproxy v0.5.14):
+  the first usable one of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`,
+  `all_proxy` (plain `http://` uses `HTTP_PROXY`/`http_proxy` first), with
+  `NO_PROXY`/`no_proxy` honoured and localhost/loopback never proxied. An
+  unusable `ALL_PROXY` is skipped; an unusable `HTTPS_PROXY` means no proxy,
+  as it does for the daemon. Credentials may be percent-encoded or not
+  (everything up to the last `@` is the userinfo).
+- `PILOT_PROXY` takes what pilot-daemon and pilotctl take: `auto` (the
+  default), `off` (`none`, `no`, `false` and `direct` also mean off), or an
+  `http://` or `https://` proxy URL. Setup hands the daemon the same reading
+  (`off` for every alias). Any other value, such as `socks5://...` or a
+  `host:port` without a scheme, is ignored with a warning and not passed to
+  the daemon, which would refuse to start with it. A `"proxy"` key in
+  `~/.pilot/config.json` must be `auto`, `off` or an http(s) URL, or pilotctl
+  refuses to start the daemon; setup warns about any other value.
 - When UDP to the beacon is blocked (three probes, no answer) and the installed
   `pilot-daemon` supports `-proxy`, setup starts it with `-transport=compat`.
   The daemon's own `-proxy` default (`auto`) then uses the proxy environment;
@@ -174,10 +182,19 @@ there, as a normal user or as root, and needs no systemd or launchd:
   unknown version, and a runtime installed elsewhere are never replaced.
   Otherwise setup keeps the runtime and points at the
   [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox).
+- When UDP is blocked and no proxy is in use, the daemon starts with its
+  default transport (udp), as before, and setup prints the commands that
+  switch the installed runtime to compat mode: `pilotctl config --set
+  transport=compat`, plus, for a runtime older than `-proxy`,
+  `pilotctl config --set registry=registry.pilotprotocol.network:443`.
+- `PILOT_TRANSPORT=udp|compat` skips the UDP probe. Only a runtime whose
+  `pilot-daemon` lists `-proxy` applies it (its pilotctl passes it on);
+  released runtimes before that (v1.13.9) ignore it, and setup says so and
+  reports the transport the daemon really runs.
 - `npx -y pilotprotocol-mcp doctor` shows the proxy the daemon would use
-  (credentials redacted), whether the daemon can use it, any ignored proxy
-  setting, and the recorded transport. `PILOT_TRANSPORT=udp|compat` skips the
-  UDP probe.
+  (credentials redacted) or `off` and which setting chose it, whether the
+  daemon can use the proxy, any proxy or transport setting that is ignored or
+  refused, and the recorded transport.
 
 ## Privacy and optional management
 

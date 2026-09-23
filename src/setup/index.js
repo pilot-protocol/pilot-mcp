@@ -53,8 +53,8 @@ export async function runSetup(flags) {
 	await step(opts.managedURL ? '4' : '3', 'Transport', async () => {
     opts.transport = await probeTransport();
     if (opts.transport === 'compat') {
-      log(String(process.env.PILOT_TRANSPORT ?? '').trim()
-        ? '  PILOT_TRANSPORT=compat: compat mode (WSS over TCP/443).'
+      log(String(process.env.PILOT_TRANSPORT ?? '').trim().toLowerCase() === 'compat'
+        ? '  PILOT_TRANSPORT=compat: UDP probe skipped.'
         : '  UDP to the beacon appears blocked (no reply to 3 probes).');
     }
   });

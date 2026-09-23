@@ -12,13 +12,16 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
   downloads honour the proxy environment (Node's built-in fetch ignores it),
   tunnelling with `CONNECT` by hostname so poisoned local DNS is never
   consulted; TLS stays end-to-end and the archive SHA-256 check is unchanged.
-  Proxy selection matches `pilot-daemon -proxy` (common/netproxy): the first
-  non-empty of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy`;
+  Proxy selection is a port of common/netproxy v0.5.14, which
+  `pilot-daemon -proxy` uses (its resolver tests run here as a parity table):
+  the first usable one of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`,
+  `all_proxy`, where an unusable `ALL_PROXY`/`all_proxy` is skipped and an
+  unusable `HTTPS_PROXY`/`https_proxy` means no proxy;
   `HTTP_PROXY`/`http_proxy` first for plain `http://`; the first non-empty of
-  `NO_PROXY`/`no_proxy`; localhost and loopback never proxied. Proxy
-  credentials are redacted from every message, and credentials that are not
-  percent-encoded are rejected rather than mistaken for the proxy host. Hosts
-  that set `HTTPS_PROXY` but relied on direct downloads can set
+  `NO_PROXY`/`no_proxy`; localhost and loopback never proxied. The userinfo
+  runs to the last `@` and is percent-decoded, so a token with an unescaped
+  `/`, `?` or `#` works. Proxy credentials are redacted from every message.
+  Hosts that set `HTTPS_PROXY` but relied on direct downloads can set
   `PILOT_PROXY=off`.
 - The UDP transport probe sends the beacon's real discover message, three
   times across its window. The old payload was never answered, so every
@@ -38,13 +41,25 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
   in config.json, or `PILOT_ENTERPRISE_CONTROL`) keep their pinned runtime,
   and a runtime of unknown version is left alone. Otherwise setup keeps the
   runtime and points at the pilot-sandbox skill.
-- `PILOT_PROXY=auto|off|none|false|direct|[http(s)://]host:port` and
-  `PILOT_TRANSPORT=udp|compat` are honoured by setup. An unusable proxy value
-  is ignored with a warning and never stops setup or a UDP host's daemon
-  start.
-- `doctor` reports the proxy the daemon would use (redacted), whether the
-  daemon supports `-proxy`, ignored proxy settings (`network.warnings`) and
-  the transport recorded in config.json (`network.transport`).
+- `PILOT_PROXY` accepts what pilot-daemon and pilotctl accept: `auto`, `off`
+  (with the aliases `none`, `no`, `false`, `direct`, any case) or an
+  `http(s)://` URL. Setup passes the daemon the value as it read it (`off` for
+  every alias, which older daemons took as the proxy host `http://none`), and
+  an unusable value (another scheme, or no scheme) is ignored with a warning
+  and not passed on, so the daemon neither refuses to start nor dials a typo.
+  A config.json `"proxy"` that pilotctl would refuse is reported on every
+  transport. `PILOT_TRANSPORT` is passed on lower-cased, or not at all when it
+  is not `udp` or `compat`.
+- `PILOT_TRANSPORT=udp|compat` skips the UDP probe and is applied only by a
+  runtime whose daemon has `-proxy`; with an older runtime (v1.13.9, which
+  ignores it) setup says so and the summary reports the transport the daemon
+  really runs. When compat mode is needed without a proxy, setup prints the
+  `pilotctl config` commands that switch the installed runtime to it.
+- `doctor` reports the proxy the daemon would use (redacted), or `off` and
+  the setting that chose it (`network.mode`, `network.setting`), whether the
+  daemon supports `-proxy`, ignored or refused proxy and transport settings
+  (`network.warnings`) and the transport recorded in config.json
+  (`network.transport`).
 
 ## [0.2.13] - 2026-08-07
 

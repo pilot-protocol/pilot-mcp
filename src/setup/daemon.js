@@ -22,15 +22,26 @@
 // UDP working (or no proxy) removes it again. A transport the user or
 // install.sh set is never changed. Older daemons keep today's start and get a
 // pointer to the pilot-sandbox skill's workaround.
+//
+// Setup plans with exactly what the daemon will read: $PILOT_PROXY and
+// $PILOT_TRANSPORT are handed over normalized ("off" for every off alias,
+// lower-case transports), and a value setup ignores is handed over empty,
+// because pilot-daemon (or pilotctl) would refuse to start with it, on any
+// transport. $PILOT_TRANSPORT counts only for a runtime that applies it.
 
 import { homedir } from 'node:os';
 import process from 'node:process';
 import { daemonBinaryPath, execPilotctl, pilotctlBinaryPath, pilotctlJSON } from '../daemon-bridge.js';
-import { inspectProxy, redactProxyURL } from '../netproxy.js';
+import { daemonProxySetting, inspectProxy, parseProxySetting, redactProxyURL } from '../netproxy.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport, writePilotConfig } from './pilot-config.js';
 import { managedNodeReason, supportsEgressProxy, upgradeRuntimeForProxy } from './runtime.js';
 
 export const PILOT_SANDBOX_SKILL_URL = 'https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox';
+
+// The raw-TCP registry `pilotctl init` and setup write into config.json, and
+// the TLS registry compat mode uses on TCP/443.
+const DEFAULT_REGISTRY = '34.71.57.205:9000';
+const COMPAT_REGISTRY = 'registry.pilotprotocol.network:443';
 
 // Environment the daemon needs to reach the network through the proxy.
 // pilotctl passes these through when it forks pilot-daemon.
@@ -91,9 +102,8 @@ export async function installDaemon({
       log(`  Egress proxy ${redactProxyURL(plan.proxy)} is set and UDP is blocked, but ${plan.daemon ?? 'pilot-daemon'}`);
       log('  has no -proxy flag, so it cannot reach the Pilot registry through the proxy.');
       log(`  Update the Pilot runtime, or follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`);
-    } else if (plan.transport === 'compat' && plan.transportSource === 'probe') {
-      log('  No egress proxy is configured, so pilot-daemon starts with its default transport;');
-      log('  setup applies compat mode automatically only behind a proxy (set PILOT_TRANSPORT=compat to force it).');
+    } else {
+      for (const line of plan.compatHint ?? []) log(`  ${line}`);
     }
     if (enterpriseControl) startArgs.push('--enterprise-control', enterpriseControl);
     const started = await execPilotctl(startArgs, { capture: Boolean(enterpriseControl), env: daemonEnvironment(env) });
@@ -152,45 +162,136 @@ export async function installDaemon({
 //   compat-proxy       proxy selected, transport compat, daemon has -proxy
 //   proxy-unsupported  proxy selected, transport compat, daemon predates -proxy
 //
-// The transport is, as pilotctl resolves it: $PILOT_TRANSPORT, then a
-// config.json "transport" the user (not setup) chose, then `transport`, the
-// UDP probe's result. The proxy is the one the daemon itself will use: the
-// config.json "proxy" key, then $PILOT_PROXY, then the proxy environment.
-// A UDP transport returns before any proxy setting is read, so no proxy
-// setting can affect a host that does not need a proxy.
+// The transport is, as pilotctl resolves it: $PILOT_TRANSPORT (only when the
+// runtime applies it), then a config.json "transport" the user (not setup)
+// chose, then `transport`, the UDP probe's result. The proxy is the one the
+// daemon itself will use: the config.json "proxy" key, then $PILOT_PROXY,
+// then the proxy environment. A UDP transport returns before the proxy
+// environment is read, so it cannot affect a host that does not need a
+// proxy; settings the daemon refuses on any transport are still reported.
 export function planDaemonStart({ transport, env = process.env, daemon, home = homedir() } = {}) {
-  const config = readPilotConfig(home).config ?? {};
-  const effective = effectiveTransport(transport, env, config);
-  const base = { transport: effective.transport, transportSource: effective.source, warnings: [] };
+  const { path: configPath, config: loaded } = readPilotConfig(home);
+  const config = loaded ?? {};
+  const warnings = daemonSettingWarnings(env, config, configPath);
+  let binary = daemon;
+  const daemonPath = () => {
+    if (binary === undefined) binary = daemonBinaryPath(locatePilotctl(env), env);
+    return binary;
+  };
+  let current;
+  // A pilot-daemon with -proxy comes with the pilotctl that applies
+  // $PILOT_TRANSPORT and --transport; released runtimes before it ignore both.
+  const currentRuntime = () => (current ??= supportsEgressProxy(daemonPath()));
+  const effective = effectiveTransport(transport, env, config, currentRuntime, warnings);
+  const base = { transport: effective.transport, transportSource: effective.source, warnings };
   if (effective.source === 'config.json' && isTransport(transport) && transport !== effective.transport) {
-    base.warnings.push(`the UDP probe suggests "${transport}", but ${readPilotConfig(home).path} sets "transport": "${effective.transport}", which setup leaves as you chose it`);
+    warnings.push(`the UDP probe suggests "${transport}", but ${configPath} sets "transport": "${effective.transport}", which setup leaves as you chose it`);
   }
   if (effective.transport !== 'compat') return { mode: 'default', ...base };
-  const spec = typeof config.proxy === 'string' ? config.proxy : undefined;
-  const { proxy, warnings } = inspectProxy(env, { spec, specSource: 'config.json proxy' });
-  base.warnings.push(...warnings.map((warning) => (warning.startsWith('config.json proxy ')
-    ? `${warning}. pilotctl refuses to start the daemon with it; fix it or clear it with \`pilotctl config --set proxy=\``
-    : warning)));
-  if (!proxy) return { mode: 'default', ...base };
-  const binary = daemon === undefined ? daemonBinaryPath(locatePilotctl(env), env) : daemon;
+  const { proxy, warnings: proxyWarnings } = inspectProxy({ ...env, ...daemonSettingsEnv(env) }, {
+    spec: configProxySpec(config),
+    specSource: 'config.json proxy',
+  });
+  warnings.push(...proxyWarnings);
+  if (!proxy) {
+    return { mode: 'default', ...base, compatHint: effective.source === 'probe' ? compatHint(currentRuntime(), config) : undefined };
+  }
   return {
-    mode: supportsEgressProxy(binary) ? 'compat-proxy' : 'proxy-unsupported',
+    mode: currentRuntime() ? 'compat-proxy' : 'proxy-unsupported',
     proxy: proxy.url,
     source: proxy.source,
-    daemon: binary,
+    daemon: daemonPath(),
     ...base,
   };
+}
+
+// daemonSettingsEnv is the $PILOT_PROXY / $PILOT_TRANSPORT the daemon gets
+// from setup: normalized, or '' (unset) for a value setup ignores.
+export function daemonSettingsEnv(env = process.env) {
+  const settings = {};
+  if (env.PILOT_PROXY !== undefined) settings.PILOT_PROXY = daemonProxySetting(env.PILOT_PROXY);
+  if (env.PILOT_TRANSPORT !== undefined) settings.PILOT_TRANSPORT = transportSetting(env.PILOT_TRANSPORT);
+  return settings;
+}
+
+// daemonSettingWarnings reports the settings pilot-daemon or pilotctl would
+// refuse, whatever the transport, and what setup does about each.
+export function daemonSettingWarnings(env, config, configPath) {
+  const warnings = [];
+  const proxyEnv = String(env.PILOT_PROXY ?? '').trim();
+  const proxySetting = parseProxySetting(proxyEnv);
+  if (proxySetting.mode === 'invalid') {
+    warnings.push(`PILOT_PROXY is not a usable proxy setting (${proxySetting.error}); pilot-daemon would refuse it, so setup starts the daemon without it (auto). Use auto, off, or an http:// or https:// proxy URL.`);
+  }
+  const transportEnv = String(env.PILOT_TRANSPORT ?? '').trim();
+  if (transportEnv && !transportSetting(transportEnv)) {
+    warnings.push(`PILOT_TRANSPORT=${JSON.stringify(transportEnv.slice(0, 40))} is not udp or compat; setup ignores it and starts pilot-daemon without it.`);
+  }
+  if (typeof config.proxy === 'string' && config.proxy.trim()) {
+    const value = config.proxy.trim();
+    const setting = parseProxySetting(value);
+    if (setting.mode === 'invalid') {
+      warnings.push(`${configPath} has a "proxy" that is not a usable proxy setting (${setting.error}); pilotctl refuses to start the daemon with it. Set it with \`pilotctl config --set proxy=auto\` (or off, or an http:// URL), or clear it with \`pilotctl config --set proxy=\`.`);
+    } else if (setting.mode !== 'explicit' && value !== setting.mode) {
+      // Not a URL, so the value holds no credentials.
+      warnings.push(`${configPath} has "proxy": ${JSON.stringify(value)}, which means "${setting.mode}", but pilotctl releases that know only "auto" and "off" refuse to start the daemon with it; set it with \`pilotctl config --set proxy=${setting.mode}\`.`);
+    }
+  }
+  if (typeof config.transport === 'string' && config.transport.trim() && !isTransport(config.transport.trim())) {
+    warnings.push(`${configPath} has "transport": ${JSON.stringify(config.transport.slice(0, 40))}, which is not "udp" or "compat"; pilot-daemon and pilotctl refuse to start with it. Fix it with \`pilotctl config --set transport=udp\` (or compat).`);
+  }
+  return warnings;
+}
+
+// configProxySpec is config.json's "proxy" when pilotctl would accept it
+// (as far as setup can tell), otherwise undefined.
+export function configProxySpec(config) {
+  if (typeof config.proxy !== 'string') return undefined;
+  return parseProxySetting(config.proxy).mode === 'invalid' ? undefined : config.proxy;
+}
+
+// compatHint tells a host that needs compat mode but has no proxy how to
+// switch the installed runtime to it. Released runtimes before -proxy ignore
+// $PILOT_TRANSPORT, and their pilotctl passes config.json's raw-TCP registry
+// explicitly, which keeps a compat daemon off the TLS registry on :443.
+function compatHint(current, config) {
+  const lines = [
+    'No egress proxy is in use, so pilot-daemon starts with its default transport (udp);',
+    'setup switches to compat mode on its own only behind a proxy. For compat mode',
+    '(WSS over TCP/443), run `pilotctl config --set transport=compat`',
+  ];
+  if (!current && String(config.registry ?? '').trim() === DEFAULT_REGISTRY) {
+    lines.push(`and \`pilotctl config --set registry=${COMPAT_REGISTRY}\``);
+    lines.push(`(this runtime hands config.json's registry to the daemon; set it back to ${DEFAULT_REGISTRY} for UDP),`);
+  }
+  lines.push('then restart the daemon: `pilotctl daemon stop && pilotctl daemon start`.');
+  return lines;
 }
 
 function isTransport(transport) {
   return transport === 'udp' || transport === 'compat';
 }
 
-function effectiveTransport(probed, env, config) {
-  const forced = String(env.PILOT_TRANSPORT ?? '').trim().toLowerCase();
-  if (forced === 'udp' || forced === 'compat') return { transport: forced, source: 'PILOT_TRANSPORT' };
+// transportSetting normalizes a $PILOT_TRANSPORT value the way pilot-daemon
+// reads it (trimmed, any case): 'udp', 'compat', or '' for anything else.
+function transportSetting(value) {
+  const transport = String(value ?? '').trim().toLowerCase();
+  return isTransport(transport) ? transport : '';
+}
+
+function effectiveTransport(probed, env, config, currentRuntime, warnings) {
   const recorded = typeof config.transport === 'string' ? config.transport.trim() : '';
-  if (recorded && !setupOwnsTransport(config)) return { transport: recorded, source: 'config.json' };
+  const chosen = isTransport(recorded) && !setupOwnsTransport(config) ? recorded : '';
+  const forced = transportSetting(env.PILOT_TRANSPORT);
+  if (forced) {
+    if (currentRuntime()) return { transport: forced, source: 'PILOT_TRANSPORT' };
+    // The daemon runs config.json's transport, or its default (udp).
+    const runs = recorded && isTransport(recorded) ? recorded : 'udp';
+    if (forced !== runs) {
+      warnings.push(`PILOT_TRANSPORT=${forced} has no effect: the installed pilot-daemon predates it and runs ${runs}.`);
+    }
+  }
+  if (chosen) return { transport: chosen, source: 'config.json' };
   return { transport: probed, source: 'probe' };
 }
 
@@ -230,12 +331,13 @@ function daemonEnvironment(env) {
   for (const name of DAEMON_PROXY_ENV) {
     if (env[name] !== undefined) forwarded[name] = env[name];
   }
-  return forwarded;
+  return { ...forwarded, ...daemonSettingsEnv(env) };
 }
 
 // egressSummary reports what the daemon was started with. A probe result of
 // "compat" only takes effect behind a proxy; otherwise the daemon runs its
-// default transport (udp) unless $PILOT_TRANSPORT or config.json chose one.
+// default transport (udp) unless config.json, or $PILOT_TRANSPORT on a
+// runtime that applies it, chose one.
 function egressSummary(plan) {
   let transport = 'udp';
   if (plan.mode === 'compat-proxy') transport = 'compat';

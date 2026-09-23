@@ -9,27 +9,38 @@
 // real server, so certificate verification is exactly what a direct request
 // would do.
 //
-// Resolution follows the Go daemon's -proxy flag (common/netproxy), so both
-// halves of the install read the same environment the same way:
-//   PILOT_PROXY unset or "auto" → the first non-empty of HTTPS_PROXY,
-//                                 https_proxy, ALL_PROXY, all_proxy; plain
-//                                 http: targets prefer HTTP_PROXY/http_proxy.
-//                                 The first non-empty of NO_PROXY/no_proxy
-//                                 exempts targets.
-//   PILOT_PROXY=off|none|false|direct → never proxy
-//   PILOT_PROXY=[http(s)://]host:port → that proxy for every target (NO_PROXY
-//                                 does not apply; a missing scheme means http)
-// localhost and loopback addresses are never proxied, whatever the mode.
+// Resolution is a port of common/netproxy v0.5.14 (what pilot-daemon's
+// -proxy uses), so both halves of the install read the same environment the
+// same way. test/netproxy.test.js carries common's resolver test vectors as a
+// parity table.
 //
-// Resolution never throws. A value that is not a usable http(s) proxy URL is
-// ignored with a warning (inspectProxy reports it): a malformed setting can
-// cost the proxy, but never a direct install on a host that does not need
-// one. An ignored PILOT_PROXY falls back to "auto"; an ignored HTTPS_PROXY
-// does not fall through to ALL_PROXY, because Go takes the first non-empty
-// variable and the daemon must agree with setup about which one applies.
+// The proxy setting (PILOT_PROXY, or the daemon's config.json "proxy"):
+//   unset, "auto"      the proxy environment, below
+//   "off"              never proxy; "none", "no", "false" and "direct" are
+//                      accepted as "off" too (any case)
+//   http(s)://...      that proxy for every target (NO_PROXY does not apply)
+// Anything else, including a host:port without a scheme, is not a usable
+// setting: pilot-daemon and pilotctl reject it, so setup ignores it with a
+// warning and never hands it to the daemon (see daemonProxySetting).
 //
-// No proxy selected means the request goes to globalThis.fetch unchanged.
-// Proxy credentials never appear in errors, warnings or logs; use
+// The proxy environment (auto):
+//   https: targets     the first usable of HTTPS_PROXY, https_proxy,
+//                      ALL_PROXY, all_proxy. An unusable ALL_PROXY/all_proxy
+//                      is skipped; an unusable HTTPS_PROXY/https_proxy means
+//                      no proxy at all (Go fails the whole resolver, and the
+//                      daemon then dials directly).
+//   http: targets      the first usable of HTTP_PROXY, http_proxy (only
+//                      http_proxy under CGI), otherwise the https: proxy.
+//   NO_PROXY           the first non-empty of NO_PROXY/no_proxy exempts
+//                      targets.
+// A proxy URL's scheme is optional (http), and everything up to the LAST '@'
+// is the userinfo, percent-decoded, so a token holding '/', '?' or '#' works
+// unescaped. localhost and loopback addresses are never proxied.
+//
+// Resolution never throws: an unusable value costs the proxy (with a
+// warning, see inspectProxy), never a direct install on a host that does not
+// need one. No proxy selected means the request goes to globalThis.fetch
+// unchanged. Proxy credentials never appear in errors, warnings or logs; use
 // redactProxyURL().
 
 import { Buffer } from 'node:buffer';
@@ -45,13 +56,53 @@ const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
 const MAX_REDIRECTS = 20;
 
 // Setting values (PILOT_PROXY, the daemon's config.json "proxy") that turn
-// proxying off.
-export const PROXY_OFF_VALUES = Object.freeze(['off', 'none', 'false', 'direct']);
+// proxying off, compared case-insensitively. pilot-daemon accepts the same
+// aliases; older builds know only "off", so setup always hands the daemon
+// "off" (see daemonProxySetting).
+export const PROXY_OFF_VALUES = Object.freeze(['off', 'none', 'no', 'false', 'direct']);
 
 const SECURE_PROXY_VARS = ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'];
+// An unusable value in one of these names the TLS proxy explicitly, so Go
+// fails the whole environment instead of skipping to the next variable.
+const FATAL_PROXY_VARS = new Set(['HTTPS_PROXY', 'https_proxy']);
+
+// parseProxySetting reads a proxy setting (PILOT_PROXY, config.json "proxy"):
+//   { mode: 'auto' } | { mode: 'off' } | { mode: 'explicit', url }
+//   | { mode: 'invalid', error }
+// An explicit proxy needs an http:// or https:// scheme, as pilot-daemon and
+// pilotctl require, so a typo never becomes a proxy host name. `error` never
+// contains the value.
+export function parseProxySetting(value) {
+  const text = String(value ?? '').trim();
+  const word = text.toLowerCase();
+  if (!word || word === 'auto') return { mode: 'auto' };
+  if (PROXY_OFF_VALUES.includes(word)) return { mode: 'off' };
+  const cut = text.indexOf('://');
+  if (cut < 0 || !validScheme(text.slice(0, cut))) {
+    return { mode: 'invalid', error: 'not auto, off, or an http:// or https:// proxy URL' };
+  }
+  const parsed = parseProxyURL(text);
+  return parsed.url ? { mode: 'explicit', url: parsed.url } : { mode: 'invalid', error: parsed.error };
+}
+
+// daemonProxySetting is the PILOT_PROXY value setup hands pilot-daemon for a
+// raw $PILOT_PROXY, so the daemon reads it exactly as setup did: "auto" and
+// "off" (for every off alias) spelled the way every daemon build accepts,
+// an explicit URL unchanged, and '' (unset: the daemon's auto default) for a
+// value setup ignores, which the daemon would otherwise refuse, or take as a
+// proxy host name, on any transport.
+export function daemonProxySetting(value) {
+  const setting = parseProxySetting(value);
+  if (setting.mode === 'explicit') return String(value).trim();
+  if (setting.mode === 'off') return 'off';
+  if (setting.mode === 'auto' && String(value ?? '').trim()) return 'auto';
+  return '';
+}
 
 // inspectProxy resolves the proxy settings once and never throws:
 //   mode      'auto' | 'off' | 'explicit'
+//   setting   where the mode came from ('PILOT_PROXY', `specSource`), or
+//             null for auto by default
 //   proxy     { url, source } used for https: targets (and the daemon's
 //             registry/beacon traffic), or null
 //   plain     { url, source } override for http: targets (auto mode), or null
@@ -59,46 +110,67 @@ const SECURE_PROXY_VARS = ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy
 //   warnings  log-safe notes about values that were ignored
 // `spec` (named `specSource`) takes the place of PILOT_PROXY when it is
 // non-empty; setup passes the daemon's config.json "proxy" key this way,
-// because the daemon applies that key ahead of $PILOT_PROXY.
+// because pilotctl hands that key to the daemon ahead of $PILOT_PROXY.
 export function inspectProxy(env = process.env, { spec, specSource = 'PILOT_PROXY' } = {}) {
   const warnings = [];
-  let setting = String(spec ?? '').trim();
-  let settingSource = specSource;
-  if (!setting) {
-    setting = String(env.PILOT_PROXY ?? '').trim();
-    settingSource = 'PILOT_PROXY';
+  let raw = String(spec ?? '').trim();
+  let source = specSource;
+  if (!raw) {
+    raw = String(env.PILOT_PROXY ?? '').trim();
+    source = 'PILOT_PROXY';
   }
-  const word = setting.toLowerCase();
-  if (PROXY_OFF_VALUES.includes(word)) {
-    return { mode: 'off', proxy: null, plain: null, noProxy: EMPTY_NO_PROXY, warnings };
+  const setting = parseProxySetting(raw);
+  if (setting.mode === 'off') {
+    return { mode: 'off', setting: source, proxy: null, plain: null, noProxy: EMPTY_NO_PROXY, warnings };
   }
-  if (setting && word !== 'auto') {
-    const parsed = parseProxyURL(setting);
-    if (parsed.url) {
-      return { mode: 'explicit', proxy: { url: parsed.url, source: settingSource }, plain: null, noProxy: EMPTY_NO_PROXY, warnings };
-    }
-    warnings.push(`${settingSource} is not a usable proxy (${parsed.error}); setup ignores it and uses the proxy environment (auto)`);
+  if (setting.mode === 'explicit') {
+    return { mode: 'explicit', setting: source, proxy: { url: setting.url, source }, plain: null, noProxy: EMPTY_NO_PROXY, warnings };
   }
+  if (setting.mode === 'invalid') {
+    warnings.push(`${source} is not a usable proxy setting (${setting.error}); setup ignores it and uses the proxy environment (auto)`);
+  }
+  return { ...environmentProxy(env, warnings), setting: raw && setting.mode === 'auto' ? source : null };
+}
 
+// environmentProxy is common/netproxy's fromEnv: each variable is parsed on
+// its own, so one bad value never disables another, except that an unusable
+// HTTPS_PROXY/https_proxy (which names the TLS proxy) means no proxy at all.
+function environmentProxy(env, warnings) {
+  const none = { mode: 'auto', proxy: null, plain: null, noProxy: EMPTY_NO_PROXY, warnings };
   let proxy = null;
-  const [secureRaw, secureVar] = firstEnv(env, SECURE_PROXY_VARS);
-  if (secureRaw) {
-    const parsed = parseProxyURL(secureRaw);
-    if (parsed.url) proxy = { url: parsed.url, source: secureVar };
-    else warnings.push(`${secureVar} is not a usable proxy (${parsed.error}); not using a proxy for HTTPS`);
+  for (const name of SECURE_PROXY_VARS) {
+    const parsed = envProxy(env, name);
+    if (parsed?.url) {
+      proxy = { url: parsed.url, source: name };
+      break;
+    }
+    if (!parsed) continue;
+    if (FATAL_PROXY_VARS.has(name)) {
+      warnings.push(`${name} is not a usable proxy (${parsed.error}); pilot-daemon then ignores the proxy environment and connects directly, and so does setup`);
+      return none;
+    }
+    warnings.push(`${name} is not a usable proxy (${parsed.error}); skipped`);
   }
   let plain = null;
   // Like net/http, HTTP_PROXY is ignored under CGI (REQUEST_METHOD set) so a
   // request header cannot inject a proxy.
   const plainVars = String(env.REQUEST_METHOD ?? '') ? ['http_proxy'] : ['HTTP_PROXY', 'http_proxy'];
-  const [plainRaw, plainVar] = firstEnv(env, plainVars);
-  if (plainRaw) {
-    const parsed = parseProxyURL(plainRaw);
-    if (parsed.url) plain = { url: parsed.url, source: plainVar };
-    else warnings.push(`${plainVar} is not a usable proxy (${parsed.error}); http:// requests use ${proxy ? proxy.source : 'no proxy'}`);
+  for (const name of plainVars) {
+    const parsed = envProxy(env, name);
+    if (parsed?.url) {
+      plain = { url: parsed.url, source: name };
+      break;
+    }
+    if (parsed) warnings.push(`${name} is not a usable proxy (${parsed.error}); skipped`);
   }
   const [noProxyRaw] = firstEnv(env, ['NO_PROXY', 'no_proxy']);
-  return { mode: 'auto', proxy, plain, noProxy: parseNoProxy(noProxyRaw), warnings };
+  return { ...none, proxy, plain, noProxy: parseNoProxy(noProxyRaw) };
+}
+
+// envProxy parses one proxy variable: null when it is unset or blank.
+function envProxy(env, name) {
+  const raw = String(env[name] ?? '').trim();
+  return raw ? parseProxyURL(raw) : null;
 }
 
 // configuredProxy reports the proxy selected for HTTPS traffic, ignoring
@@ -177,28 +249,106 @@ function firstEnv(env, names) {
   return ['', ''];
 }
 
-// parseProxyURL mirrors common/netproxy: "host:port" without a scheme is an
-// http proxy; only http and https proxies are supported. The returned error
-// never contains the value, which may carry credentials.
+const WITHHELD = 'invalid proxy URL; value withheld because it contains credentials';
+
+// Schemes that are safe to name in an error even when the value carries
+// credentials (common/netproxy knownScheme).
+const KNOWN_SCHEMES = new Set(['socks', 'socks4', 'socks4a', 'socks5', 'socks5h', 'ftp', 'ws', 'wss', 'quic', 'h2', 'file']);
+
+// parseProxyURL is common/netproxy v0.5.14 parseProxyURL: the scheme is
+// optional (http), only http and https proxies are supported, and the
+// userinfo runs to the LAST '@' and is percent-decoded, so credentials may
+// hold unescaped '/', '?', '#' or '@' (url parsers would take part of such
+// a token as the proxy host). The URL returned carries the credentials
+// re-encoded byte for byte; the error never contains the value.
 function parseProxyURL(raw) {
-  const value = raw.includes('://') ? raw : `http://${raw}`;
+  const text = String(raw).trim();
+  let scheme = 'http';
+  let rest = text;
+  const cut = text.indexOf('://');
+  if (cut >= 0 && validScheme(text.slice(0, cut))) {
+    scheme = text.slice(0, cut);
+    rest = text.slice(cut + 3);
+  }
+  scheme = scheme.toLowerCase();
+  if (scheme !== 'http' && scheme !== 'https') {
+    // With '@' in the value the "scheme" could be a user name
+    // ("user://pass@host"), so only a well-known scheme is named.
+    if (rest.includes('@') && !KNOWN_SCHEMES.has(scheme)) return { error: 'unsupported scheme, want http or https' };
+    return { error: `unsupported scheme "${scheme}", want http or https` };
+  }
+  let credentials = null;
+  let hostPart = rest;
+  const at = rest.lastIndexOf('@');
+  if (at >= 0) {
+    credentials = parseUserinfo(rest.slice(0, at));
+    if (credentials === undefined) return { error: WITHHELD };
+    hostPart = rest.slice(at + 1);
+  }
+  // hostPart holds no credentials: everything up to the last '@' is gone.
   let url;
   try {
-    url = new URL(value);
+    url = new URL(`${scheme}://${hostPart}`);
   } catch {
-    return { error: raw.includes('@') ? 'malformed URL; value withheld because it contains credentials' : 'malformed URL' };
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return { error: `unsupported scheme "${url.protocol.replace(/:$/, '')}", want http or https` };
-  }
-  // An unescaped '/', '?' or '#' in the credentials ends the authority early:
-  // part of the secret would become the proxy host and leak into DNS and
-  // logs. A proxy URL never legitimately has '@' outside its userinfo.
-  if (value.includes('@') && !url.username && !url.password) {
-    return { error: 'credentials must be percent-encoded; value withheld' };
+    return { error: credentials ? WITHHELD : 'malformed URL' };
   }
   if (!url.hostname) return { error: 'no proxy host' };
+  if (credentials) {
+    url.username = percentEncodeBytes(credentials.user);
+    if (credentials.password) url.password = percentEncodeBytes(credentials.password);
+  }
   return { url };
+}
+
+// parseUserinfo decodes "user[:password]" into byte strings: null for an
+// empty userinfo (no credentials), undefined when it is unusable (a control
+// character or a bad percent-escape).
+function parseUserinfo(text) {
+  if (!text) return null;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return undefined;
+  }
+  const colon = text.indexOf(':');
+  const user = pathUnescape(colon < 0 ? text : text.slice(0, colon));
+  const password = colon < 0 ? null : pathUnescape(text.slice(colon + 1));
+  if (!user || (colon >= 0 && !password)) return undefined;
+  return { user, password };
+}
+
+// pathUnescape is Go's url.PathUnescape on the UTF-8 bytes of `text`: '%XX'
+// becomes the byte, '+' stays '+', and a malformed escape is an error (null).
+function pathUnescape(text) {
+  const bytes = Buffer.from(text, 'utf8');
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] !== 0x25) {
+      out.push(bytes[i]);
+      continue;
+    }
+    const hex = bytes.subarray(i + 1, i + 3).toString('latin1');
+    if (!/^[0-9A-Fa-f]{2}$/.test(hex)) return null;
+    out.push(Number.parseInt(hex, 16));
+    i += 2;
+  }
+  return Buffer.from(out);
+}
+
+// percentEncodeBytes escapes every byte outside RFC 3986 "unreserved", so the
+// bytes survive the URL and decode back exactly (see proxyAuthorization).
+function percentEncodeBytes(bytes) {
+  let out = '';
+  for (const byte of bytes) {
+    const char = String.fromCharCode(byte);
+    out += /[A-Za-z0-9\-._~]/.test(char) ? char : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+  }
+  return out;
+}
+
+// validScheme reports whether text is a syntactically valid URL scheme
+// (RFC 3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )).
+function validScheme(text) {
+  return /^[A-Za-z][A-Za-z0-9+.-]*$/.test(text);
 }
 
 // NO_PROXY, with the common/netproxy (Go httpproxy) rules: comma- or
@@ -210,13 +360,14 @@ const EMPTY_NO_PROXY = Object.freeze({ all: false, cidrs: [], ips: [], domains: 
 
 function parseNoProxy(raw) {
   const parsed = { all: false, cidrs: [], ips: [], domains: [] };
-  for (const field of String(raw ?? '').split(/[,\s]+/)) {
+  // Go splits on exactly these separators (strings.FieldsFunc).
+  for (const field of String(raw ?? '').split(/[, \t\n\r]+/)) {
     const entry = field.toLowerCase();
     if (!entry) continue;
     if (entry === '*') return { ...EMPTY_NO_PROXY, all: true };
-    if (entry.includes('/')) {
-      const cidr = parseCIDR(entry);
-      if (cidr) parsed.cidrs.push(cidr);
+    const cidr = entry.includes('/') ? parseCIDR(entry) : null;
+    if (cidr) {
+      parsed.cidrs.push(cidr);
       continue;
     }
     const split = splitHostPort(entry);
@@ -308,15 +459,20 @@ function defaultPort(url) {
   return url.protocol === 'http:' ? 80 : 443;
 }
 
+// proxyAuthorization is the Basic Proxy-Authorization for a proxy URL's
+// credentials, decoded to their exact bytes as Go's net/http sends them.
+function proxyAuthorization(proxy) {
+  const decode = (text) => pathUnescape(text) ?? Buffer.from(text, 'utf8');
+  const credentials = Buffer.concat([decode(proxy.username), Buffer.from(':'), decode(proxy.password)]);
+  return `Basic ${credentials.toString('base64')}`;
+}
+
 // openTunnel asks the proxy to CONNECT to the target *by hostname* and
 // resolves with the raw tunnelled socket.
 function openTunnel(target, proxy, { signal, tlsOptions }) {
   const authority = `${target.hostname}:${target.port || defaultPort(target)}`;
   const headers = { host: authority };
-  if (proxy.username || proxy.password) {
-    const credentials = `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`;
-    headers['proxy-authorization'] = `Basic ${Buffer.from(credentials).toString('base64')}`;
-  }
+  if (proxy.username || proxy.password) headers['proxy-authorization'] = proxyAuthorization(proxy);
   const safeProxy = redactProxyURL(proxy);
   const transport = proxy.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {

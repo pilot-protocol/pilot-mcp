@@ -17,7 +17,9 @@ import { join } from 'node:path';
 import {
   configuredProxy,
   createProxyAwareFetch,
+  daemonProxySetting,
   inspectProxy,
+  parseProxySetting,
   redactProxyURL,
   resolveProxy,
 } from '../src/netproxy.js';
@@ -51,33 +53,35 @@ test('plain http targets prefer HTTP_PROXY and otherwise use the HTTPS proxy, as
   assert.match(settings.warnings.join('\n'), /HTTP_PROXY is not a usable proxy \(unsupported scheme "socks5"/);
 });
 
-test('the first non-empty proxy variable decides; an unusable one means no proxy, with a warning', () => {
+test('an unusable ALL_PROXY is skipped; an unusable HTTPS_PROXY means no proxy, as in common v0.5.14', () => {
   assert.equal(resolveProxy('https://github.com/', { HTTPS_PROXY: 'proxy.internal:3128' }).href, 'http://proxy.internal:3128/');
   assert.equal(resolveProxy('https://github.com/', { ALL_PROXY: 'socks5://127.0.0.1:1080' }), null);
-  // Go's netproxy takes the first non-empty variable; skipping to ALL_PROXY
-  // here would route setup through a proxy the daemon does not use.
-  const env = { HTTPS_PROXY: 'socks5://user:s3cr3t@127.0.0.1:1080', ALL_PROXY: 'http://c:3' };
+  // ALL_PROXY does not name the TLS proxy, so Go skips it to all_proxy (the
+  // review repro: Go proxies via p.corp:3128 here).
+  const skipped = { ALL_PROXY: 'socks5://127.0.0.1:1080', all_proxy: 'http://p.corp:3128' };
+  assert.equal(resolveProxy('https://github.com/', skipped).host, 'p.corp:3128');
+  assert.equal(configuredProxy(skipped).source, 'all_proxy');
+  assert.match(inspectProxy(skipped).warnings.join('\n'), /^ALL_PROXY is not a usable proxy \(unsupported scheme "socks5", want http or https\); skipped$/);
+  // An unusable HTTPS_PROXY fails Go's whole environment: the daemon dials
+  // directly, so setup selects no proxy either, for any target.
+  const env = { HTTPS_PROXY: 'socks5://user:s3cr3t@127.0.0.1:1080', ALL_PROXY: 'http://c:3', HTTP_PROXY: 'http://d:4' };
   assert.equal(resolveProxy('https://github.com/', env), null);
+  assert.equal(resolveProxy('http://github.com/', env), null);
   assert.equal(configuredProxy(env), null);
   const { warnings } = inspectProxy(env);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /^HTTPS_PROXY is not a usable proxy \(unsupported scheme "socks5", want http or https\)/);
+  assert.match(warnings[0], /^HTTPS_PROXY is not a usable proxy \(unsupported scheme "socks5", want http or https\); pilot-daemon then ignores the proxy environment/);
   assert.doesNotMatch(warnings[0], /s3cr3t|user/);
 });
 
-test('credentials that are not percent-encoded are rejected instead of becoming the proxy host', () => {
-  for (const value of [
-    'http://abcDEF/ghi+jkl@proxy.muse:3128',
-    'http://user:9876/zz@proxy:3128',
-    'http://user:9876?zz@proxy:3128',
-    'http://user:98#76@proxy:3128',
-  ]) {
-    const { proxy, warnings } = inspectProxy({ HTTPS_PROXY: value });
-    assert.equal(proxy, null, value);
-    assert.match(warnings.join('\n'), /percent-encoded|malformed/, value);
-    assert.doesNotMatch(warnings.join('\n'), /abcDEF|ghi|9876|zz|user/, value);
-  }
+test('credentials may hold unescaped / ? # @: the userinfo runs to the last @, as in common v0.5.14', () => {
+  // The review repro: Go gives mode=auto proxy=http://***@proxy.corp:3128.
+  const selected = configuredProxy({ HTTPS_PROXY: 'http://abc/def:tok@proxy.corp:3128' });
+  assert.equal(selected.url.host, 'proxy.corp:3128');
+  assert.deepEqual(credentialsOf(selected.url), ['abc/def', 'tok']);
+  assert.equal(redactProxyURL(selected.url), 'http://***@proxy.corp:3128');
   assert.equal(configuredProxy({ HTTPS_PROXY: `http://${PROXY_USERINFO}@proxy:3128` }).url.hostname, 'proxy');
+  assert.deepEqual(credentialsOf(configuredProxy({ HTTPS_PROXY: `http://${CREDENTIALS}@proxy:3128` }).url), ['muse-agent', 's3cr3t/p@ss']);
 });
 
 test('NO_PROXY follows the Go httpproxy matching rules', () => {
@@ -116,29 +120,45 @@ test('localhost and loopback addresses are never proxied, whatever the mode', ()
   }
 });
 
-test('PILOT_PROXY selects auto, off, or an explicit proxy', () => {
+test('PILOT_PROXY selects auto, off, or an explicit http(s):// proxy, as pilot-daemon and pilotctl accept them', () => {
   const env = { HTTPS_PROXY: 'http://env:1', NO_PROXY: 'github.com' };
   assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: 'auto' }).host, 'env:1');
-  assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: 'AUTO' }).host, 'env:1');
-  for (const off of ['off', 'OFF', 'none', 'false', 'direct']) {
+  assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: ' AUTO ' }).host, 'env:1');
+  for (const off of ['off', 'OFF', 'none', ' None ', 'no', 'false', 'direct']) {
     assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: off }), null, off);
     assert.equal(inspectProxy({ ...env, PILOT_PROXY: off }).mode, 'off', off);
+    assert.equal(inspectProxy({ ...env, PILOT_PROXY: off }).setting, 'PILOT_PROXY', off);
+    assert.deepEqual(parseProxySetting(off), { mode: 'off' }, off);
   }
   // An explicit proxy applies to every target; NO_PROXY does not exempt any.
   assert.equal(resolveProxy('https://github.com/', { ...env, PILOT_PROXY: 'https://u:p@explicit:2' }).host, 'explicit:2');
-  // Like Go's netproxy.Explicit, a missing scheme means http.
-  assert.equal(resolveProxy('https://github.com/', { PILOT_PROXY: 'proxy.corp:3128' }).href, 'http://proxy.corp:3128/');
+  assert.equal(resolveProxy('https://github.com/', { PILOT_PROXY: 'HTTP://Proxy.corp:3128' }).host, 'proxy.corp:3128');
 });
 
 test('an unusable PILOT_PROXY never throws: it is ignored with a warning and auto applies', () => {
-  for (const value of ['socks5://explicit:2', 'http://', 'http://u:s3cr3t@:3128']) {
+  // Without an http(s):// scheme a setting is refused (by pilotctl and
+  // pilot-daemon too), so a typo never becomes a proxy host name.
+  for (const value of ['socks5://explicit:2', 'http://', 'http://u:s3cr3t@:3128', 'proxy.corp:3128', 'u:s3cr3t@proxy.corp:3128', 'nonee', 'yes', 'user:pa://s3cr3t@proxy:3128']) {
     assert.doesNotThrow(() => resolveProxy('https://github.com/', { PILOT_PROXY: value }));
     assert.equal(resolveProxy('https://github.com/', { PILOT_PROXY: value }), null, value);
     assert.equal(resolveProxy('https://github.com/', { PILOT_PROXY: value, HTTPS_PROXY: 'http://env:1' }).host, 'env:1', value);
     const { mode, warnings } = inspectProxy({ PILOT_PROXY: value });
     assert.equal(mode, 'auto', value);
-    assert.match(warnings.join('\n'), /^PILOT_PROXY is not a usable proxy/, value);
+    assert.equal(parseProxySetting(value).mode, 'invalid', value);
+    assert.match(warnings.join('\n'), /^PILOT_PROXY is not a usable proxy setting/, value);
     assert.doesNotMatch(warnings.join('\n'), /s3cr3t/);
+  }
+});
+
+test('pilot-daemon gets PILOT_PROXY exactly as setup read it', () => {
+  // Every off alias becomes "off", which every pilot-daemon build accepts
+  // (older builds took "none" as the proxy host http://none).
+  for (const off of ['off', 'OFF', 'none', 'No', 'false', 'direct']) assert.equal(daemonProxySetting(off), 'off', off);
+  assert.equal(daemonProxySetting('AUTO'), 'auto');
+  assert.equal(daemonProxySetting(' http://u:p@proxy:3128 '), 'http://u:p@proxy:3128');
+  // A value setup ignores is not handed over: '' is the daemon's auto default.
+  for (const ignored of ['socks5://127.0.0.1:1080', 'proxy.corp:3128', 'http://', 'nonee', '', '  ']) {
+    assert.equal(daemonProxySetting(ignored), '', ignored);
   }
 });
 
@@ -366,6 +386,240 @@ test('a per-user runtime without -proxy is upgraded through the proxy only to a 
   assert.equal(versionOf(stillLegacy), 'v1.13.9');
   assert.deepEqual(stagesOf(stillLegacy), []);
 });
+
+// Parity table: the test vectors of common/netproxy v0.5.14
+// (netproxy/zz_resolver_test.go), which pilot-daemon resolves -proxy with.
+// When common changes a rule, port it to src/netproxy.js and here.
+const REGISTRY = 'https://registry.pilotprotocol.network/';
+
+test('common v0.5.14 parity: TestFromEnvPrecedence', () => {
+  for (const [name, env, want] of [
+    ['none', {}, ''],
+    ['HTTPS_PROXY', { HTTPS_PROXY: 'http://a:1', https_proxy: 'http://b:1', ALL_PROXY: 'http://c:1' }, 'http://a:1'],
+    ['https_proxy', { https_proxy: 'http://b:1', ALL_PROXY: 'http://c:1' }, 'http://b:1'],
+    ['ALL_PROXY fallback', { ALL_PROXY: 'http://c:1', all_proxy: 'http://d:1' }, 'http://c:1'],
+    ['all_proxy fallback', { all_proxy: 'http://d:1' }, 'http://d:1'],
+    ['blank values skipped', { HTTPS_PROXY: '  ', all_proxy: 'http://d:1' }, 'http://d:1'],
+    ['HTTP_PROXY alone does not cover TCP/TLS targets', { HTTP_PROXY: 'http://h:1' }, ''],
+    ['scheme-less value means http', { HTTPS_PROXY: 'proxy.internal:3128' }, 'http://proxy.internal:3128'],
+  ]) {
+    assert.equal(inspectProxy(env).mode, 'auto', name);
+    assert.equal(show(resolveProxy(REGISTRY, env)), want, name);
+    assert.equal(show(resolveProxy('https://registry.pilotprotocol.network/x', env)), want, name);
+  }
+});
+
+test('common v0.5.14 parity: TestFromEnvPlainHTTPRequests', () => {
+  const both = { HTTPS_PROXY: 'http://secure:1', HTTP_PROXY: 'http://plain:1' };
+  assert.equal(show(resolveProxy('http://example.pilot.invalid/', both)), 'http://plain:1');
+  assert.equal(show(resolveProxy('https://example.pilot.invalid/', both)), 'http://secure:1');
+  assert.equal(show(resolveProxy('http://example.pilot.invalid/', { HTTPS_PROXY: 'http://secure:1' })), 'http://secure:1');
+  assert.equal(resolveProxy('http://example.pilot.invalid/', { REQUEST_METHOD: 'GET', HTTP_PROXY: 'http://evil:1' }), null);
+  assert.equal(show(resolveProxy('http://example.pilot.invalid/', { REQUEST_METHOD: 'GET', HTTP_PROXY: 'http://evil:1', http_proxy: 'http://ok:1' })), 'http://ok:1');
+});
+
+test('common v0.5.14 parity: TestAutoAlwaysBypassesLoopback', () => {
+  const env = { HTTPS_PROXY: 'http://p:1' };
+  for (const target of ['https://localhost:443/', 'https://LOCALHOST:1/', 'https://127.0.0.1:9000/', 'https://127.9.9.9:1/', 'https://[::1]:443/']) {
+    assert.equal(resolveProxy(target, env), null, target);
+  }
+  assert.equal(show(resolveProxy('https://10.0.0.1/', env)), 'http://p:1');
+});
+
+test('common v0.5.14 parity: TestParseExplicitURLs', () => {
+  for (const [raw, scheme, host, user, password] of [
+    ['http://proxy:3128', 'http:', 'proxy:3128'],
+    ['HTTP://Proxy:3128', 'http:', 'proxy:3128'],
+    ['https://u:p@proxy.example', 'https:', 'proxy.example', 'u', 'p'],
+    ['proxy.example:8080', 'http:', 'proxy.example:8080'],
+    ['u:p@proxy.example:8080', 'http:', 'proxy.example:8080', 'u', 'p'],
+    ['  http://[::1]:3128  ', 'http:', '[::1]:3128'],
+    ['http://u%40corp:p%3Aw@h:1/x', 'http:', 'h:1', 'u@corp', 'p:w'],
+  ]) {
+    // Go's Explicit takes a scheme-less URL; a proxy *setting* (PILOT_PROXY)
+    // must name its scheme, so those two are checked as HTTPS_PROXY values.
+    const envs = [{ HTTPS_PROXY: raw }];
+    if (raw.includes('://')) envs.push({ PILOT_PROXY: raw });
+    for (const env of envs) {
+      const selected = configuredProxy(env);
+      assert.ok(selected, `${raw} ${Object.keys(env)}`);
+      assert.equal(selected.url.protocol, scheme, raw);
+      assert.equal(selected.url.host, host, raw);
+      assert.deepEqual(credentialsOf(selected.url), user === undefined ? null : [user, password], raw);
+    }
+  }
+});
+
+test('common v0.5.14 parity: TestParseErrorsNeverLeakCredentials', () => {
+  for (const raw of [
+    'socks5://user:hunter2@proxy:1080',
+    'http://user:hunter2@proxy:bad-port',
+    'http://user:hunter2@',
+    'http://user:hunter2@proxy%zz:1',
+    'ftp://proxy:21',
+    'http://',
+  ]) {
+    for (const [name, env] of [['PILOT_PROXY', { PILOT_PROXY: raw }], ['HTTPS_PROXY', { HTTPS_PROXY: raw }]]) {
+      const { proxy, warnings } = inspectProxy(env);
+      assert.equal(proxy, null, `${name}=${raw}`);
+      assert.equal(warnings.length, 1, `${name}=${raw}`);
+      assert.ok(warnings[0].startsWith(`${name} is not a usable proxy`), warnings[0]);
+      assert.doesNotMatch(warnings[0], /hunter2|user:/, `${name}=${raw}`);
+    }
+  }
+  const { proxy, warnings } = inspectProxy({ HTTP_PROXY: 'gopher://user:hunter2@x:1' });
+  assert.equal(proxy, null);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^HTTP_PROXY is not a usable proxy/);
+  assert.doesNotMatch(warnings[0], /hunter2|user/);
+});
+
+test('common v0.5.14 parity: TestFromEnvVariablesAreIndependent', () => {
+  const secure = 'http://u:p@egress:3128';
+  for (const [name, env, wantTLS, wantPlain, wantWarned] of [
+    ['socks HTTP_PROXY beside a valid HTTPS_PROXY', { HTTPS_PROXY: secure, HTTP_PROXY: 'socks5://proxy:1080' }, secure, secure, ['HTTP_PROXY']],
+    ['garbage http_proxy beside a valid https_proxy', { https_proxy: secure, http_proxy: 'garbage with space' }, secure, secure, ['http_proxy']],
+    ['unusable HTTP_PROXY falls through to http_proxy', { HTTPS_PROXY: secure, HTTP_PROXY: 'socks5h://x:1', http_proxy: 'http://plain:8080' }, secure, 'http://plain:8080', ['HTTP_PROXY']],
+    ['socks ALL_PROXY alone is ignored', { ALL_PROXY: 'socks5://127.0.0.1:1080' }, '', '', ['ALL_PROXY']],
+    ['unusable ALL_PROXY falls through to all_proxy', { ALL_PROXY: 'socks5://127.0.0.1:1080', all_proxy: secure }, secure, secure, ['ALL_PROXY']],
+    ['everything unusable except HTTPS_PROXY', { HTTPS_PROXY: secure, ALL_PROXY: 'socks5://a:1', HTTP_PROXY: 'http://bad port', http_proxy: 'ftp://c:21' }, secure, secure, ['HTTP_PROXY', 'http_proxy']],
+  ]) {
+    assert.equal(show(resolveProxy(REGISTRY, env)), wantTLS, name);
+    assert.equal(show(resolveProxy('http://plain.pilot.invalid/', env)), wantPlain, name);
+    const { warnings } = inspectProxy(env);
+    assert.deepEqual(warnings.map((warning) => warning.split(' ')[0]), wantWarned, name);
+    assert.doesNotMatch(warnings.join('\n'), /u:p/, name);
+  }
+});
+
+test('common v0.5.14 parity: TestFromEnvUnusableTLSProxyIsAnError', () => {
+  for (const [env, variable] of [
+    [{ HTTPS_PROXY: 'socks5://user:hunter2@a:1', https_proxy: 'http://ok:1', HTTP_PROXY: 'http://ok:1' }, 'HTTPS_PROXY'],
+    [{ https_proxy: 'http://user:hunter2@a:bad', ALL_PROXY: 'http://ok:1' }, 'https_proxy'],
+  ]) {
+    // Go returns an error; pilot-daemon then uses no proxy at all.
+    assert.equal(resolveProxy(REGISTRY, env), null, variable);
+    assert.equal(resolveProxy('http://plain.pilot.invalid/', env), null, variable);
+    const { warnings } = inspectProxy(env);
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0].startsWith(`${variable} is not a usable proxy`), warnings[0]);
+    assert.doesNotMatch(warnings[0], /hunter2|user/);
+  }
+});
+
+test('common v0.5.14 parity: TestUnescapedDelimitersInUserinfo', () => {
+  for (const [raw, user, password, host, secrets] of [
+    ['http://abcDEF/ghi+jkl@proxy.muse:3128', 'abcDEF/ghi+jkl', null, 'proxy.muse:3128', ['abcDEF', 'ghi']],
+    ['http://user:9876/zz@proxy:3128', 'user', '9876/zz', 'proxy:3128', ['user', '9876']],
+    ['http://user:9876?zz@proxy:3128', 'user', '9876?zz', 'proxy:3128', ['user', '9876']],
+    ['http://user:98#76@proxy:3128', 'user', '98#76', 'proxy:3128', ['user', '98']],
+    ['http://AbC/dEf+ghi==@proxy:3128', 'AbC/dEf+ghi==', null, 'proxy:3128', ['AbC', 'dEf']],
+    ['https://tok:a/b?c#d@egress.internal', 'tok', 'a/b?c#d', 'egress.internal', ['tok', 'a/b']],
+    ['user:pa/ss@proxy:3128', 'user', 'pa/ss', 'proxy:3128', ['user', 'pa/ss']],
+    ['user:pa://ss@proxy:3128', 'user', 'pa://ss', 'proxy:3128', ['user', 'pa:']],
+    ['http://us@er:p@ss@proxy:3128', 'us@er', 'p@ss', 'proxy:3128', ['us@er', 'p@ss']],
+    ['http://u%2Fx:p%23w/q@proxy:3128/', 'u/x', 'p#w/q', 'proxy:3128', ['u%2F', 'p%23']],
+  ]) {
+    const envs = [{ HTTPS_PROXY: raw }];
+    if (/^https?:\/\//.test(raw)) envs.push({ PILOT_PROXY: raw });
+    for (const env of envs) {
+      const selected = configuredProxy(env);
+      assert.ok(selected, `${raw} ${Object.keys(env)}`);
+      assert.equal(selected.url.host, host, raw);
+      assert.deepEqual(credentialsOf(selected.url), [user, password ?? ''], raw);
+      const logged = redactProxyURL(selected.url);
+      assert.ok(logged.endsWith(`***@${host}`), logged);
+      for (const secret of secrets) assert.ok(!logged.includes(secret), `${raw}: ${logged} leaks ${secret}`);
+    }
+  }
+});
+
+test('common v0.5.14 parity: TestUnusableUserinfoNeverLeaks', () => {
+  for (const raw of [
+    'http://se/cret:hunter2@proxy:bad-port',
+    'http://se?cret:hun#ter2@',
+    'http://se/cret:hun%zzter2@proxy:1',
+    'http://se/cret:hunter2\x7f@proxy:1',
+    'http://se/cret:hunter2@proxy%zz:1',
+    'secret://hunter2@proxy:1',
+    'socks5://se/cret:hunter2@proxy:1',
+  ]) {
+    for (const env of [{ HTTPS_PROXY: raw }, { PILOT_PROXY: raw }]) {
+      const { proxy, warnings } = inspectProxy(env);
+      assert.equal(proxy, null, raw);
+      for (const secret of ['se/cret', 'se?cret', 'cret', 'hunter2', 'hun', 'secret']) {
+        assert.ok(!warnings.join('\n').includes(secret), `${raw}: ${warnings} leaks ${secret}`);
+      }
+    }
+  }
+});
+
+test('common v0.5.14 parity: TestProxyForRequestDefaultPorts', () => {
+  const env = { HTTPS_PROXY: 'http://p:1', NO_PROXY: 'a.invalid:443,b.invalid:80' };
+  assert.equal(resolveProxy('https://a.invalid/', env), null);
+  assert.notEqual(resolveProxy('https://b.invalid/', env), null);
+  assert.equal(resolveProxy('http://b.invalid/', env), null);
+});
+
+test('common v0.5.14 parity: TestNoProxyMatching', () => {
+  for (const [noProxy, host, port, bypass] of [
+    ['', 'registry.pilotprotocol.network', '443', false],
+    ['*', 'anything.example', '1', true],
+    ['example.com', 'example.com', '443', true],
+    ['example.com', 'api.example.com', '443', true],
+    ['example.com', 'notexample.com', '443', false],
+    ['.example.com', 'api.example.com', '443', true],
+    ['.example.com', 'example.com', '443', false],
+    ['*.example.com', 'api.example.com', '443', true],
+    ['*.example.com', 'example.com', '443', false],
+    ['EXAMPLE.com', 'Api.Example.COM', '443', true],
+    ['example.com:8443', 'example.com', '8443', true],
+    ['example.com:8443', 'example.com', '443', false],
+    ['10.1.2.3', '10.1.2.3', '443', true],
+    ['10.1.2.3:9000', '10.1.2.3', '443', false],
+    ['10.1.2.3:9000', '10.1.2.3', '9000', true],
+    ['10.0.0.0/8', '10.200.1.1', '443', true],
+    ['10.0.0.0/8', '11.0.0.1', '443', false],
+    ['fd00::/8', 'fd00::1', '443', true],
+    ['[2001:db8::1]:443', '2001:db8::1', '443', true],
+    ['2001:db8::1', '2001:db8::1', '80', true],
+    [' a.invalid ,\tb.invalid  c.invalid ', 'c.invalid', '1', true],
+    [',,:443,.,*.,', 'x.invalid', '1', false],
+    ['example.com', '10.0.0.1', '443', false],
+  ]) {
+    const target = `https://${host.includes(':') ? `[${host}]` : host}:${port}/`;
+    const direct = resolveProxy(target, { HTTPS_PROXY: 'http://p:1', NO_PROXY: noProxy }) === null;
+    assert.equal(direct, bypass, `NO_PROXY=${JSON.stringify(noProxy)} ${host}:${port}`);
+  }
+});
+
+test('unescaped credentials authenticate through the tunnel exactly as percent-encoded ones', { timeout: 20_000 }, async (t) => {
+  const origin = await startServer(http.createServer((req, res) => res.end('ok')));
+  t.after(() => origin.close());
+  const proxy = await startConnectProxy({ 'releases.pilot.invalid': origin.port });
+  t.after(() => proxy.close());
+  const port = new URL(proxy.url).port;
+  for (const proxyURL of [proxy.url, `http://${CREDENTIALS}@127.0.0.1:${port}`, `${CREDENTIALS}@127.0.0.1:${port}`]) {
+    const fetcher = createProxyAwareFetch({ env: { HTTPS_PROXY: proxyURL }, directFetch: refuseDirect });
+    assert.equal(await (await fetcher('http://releases.pilot.invalid:443/')).text(), 'ok', redactProxyURL(proxyURL));
+  }
+  assert.deepEqual(proxy.log.map((entry) => entry.authorized), [true, true, true]);
+});
+
+// show renders a proxy URL the way Go's url.URL.String does for the vectors
+// above: scheme://[user:password@]host.
+function show(url) {
+  if (!url) return '';
+  const userinfo = url.username || url.password ? `${url.username}:${url.password}@` : '';
+  return `${url.protocol}//${userinfo}${url.host}`;
+}
+
+// credentialsOf decodes a proxy URL's userinfo, as sent in
+// Proxy-Authorization: [user, password] or null.
+function credentialsOf(url) {
+  if (!url.username && !url.password) return null;
+  return [decodeURIComponent(url.username), decodeURIComponent(url.password)];
+}
 
 async function refuseDirect(url) {
   throw new Error(`unexpected direct request to ${url}`);

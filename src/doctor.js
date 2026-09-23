@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { daemonBinaryPath, daemonHealthy, pilotctlBinaryPath } from './daemon-bridge.js';
 import { inspectProxy, redactProxyURL } from './netproxy.js';
-import { PILOT_SANDBOX_SKILL_URL } from './setup/daemon.js';
+import { configProxySpec, daemonSettingsEnv, daemonSettingWarnings, PILOT_SANDBOX_SKILL_URL } from './setup/daemon.js';
 import { detectHarnesses } from './setup/detect.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport } from './setup/pilot-config.js';
 import { supportsEgressProxy } from './setup/runtime.js';
@@ -31,6 +31,8 @@ export async function runDoctor(flags = {}, options = {}) {
     write(`Daemon: ${report.daemon.healthy ? 'reachable' : 'not reachable'}`);
     if (report.network.proxy) {
       write(`Egress proxy: ${report.network.proxy} via ${report.network.source} (pilot-daemon -proxy: ${report.network.daemon_proxy_support ? 'supported' : `not supported; see ${PILOT_SANDBOX_SKILL_URL}`})`);
+    } else if (report.network.mode === 'off') {
+      write(`Egress proxy: off (${report.network.setting})`);
     }
     for (const warning of report.network.warnings ?? []) write(`Egress proxy warning: ${warning}`);
     if (report.network.transport) {
@@ -51,14 +53,18 @@ function runtimeCheck() {
   }
 }
 
-// networkCheck reports the egress proxy the daemon would use (redacted),
-// whether the daemon pilotctl would launch supports it, any proxy setting
-// that is ignored, and the transport recorded in ~/.pilot/config.json.
+// networkCheck reports the egress proxy the daemon would use (redacted) and
+// the mode behind it, whether the daemon pilotctl would launch supports it,
+// any proxy or transport setting that is ignored or refused, and the
+// transport recorded in ~/.pilot/config.json.
 function networkCheck(env, home) {
-  const { config } = readPilotConfig(home);
-  const spec = typeof config?.proxy === 'string' ? config.proxy : undefined;
-  const { proxy, warnings } = inspectProxy(env, { spec, specSource: 'config.json proxy' });
-  const report = { proxy: null };
+  const { path, config } = readPilotConfig(home);
+  const warnings = daemonSettingWarnings(env, config ?? {}, path);
+  const view = inspectProxy({ ...env, ...daemonSettingsEnv(env) }, { spec: configProxySpec(config ?? {}), specSource: 'config.json proxy' });
+  warnings.push(...view.warnings);
+  const { proxy } = view;
+  const report = { proxy: null, mode: view.mode };
+  if (view.setting) report.setting = view.setting;
   if (proxy) {
     let daemon = null;
     try {

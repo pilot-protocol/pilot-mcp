@@ -257,6 +257,151 @@ test('an unusable proxy setting never blocks a UDP host and never throws', { ski
   assert.doesNotMatch(lines.join('\n'), /s3cr3t/);
 });
 
+test('an unusable proxy setting never blocks a UDP host and never throws, and is kept from the daemon', { skip }, async (t) => {
+  // Setup ignores these, so the daemon, which would refuse them (or, before
+  // it validated them, take a bare word as the proxy host), never sees them.
+  for (const value of ['socks5://127.0.0.1:1080', 'proxy.corp:3128', 'nonee']) {
+    for (const [transport, extra] of [['udp', {}], ['compat', { HTTPS_PROXY: PROXY }]]) {
+      const fx = fixture(t, PROXY_USAGE);
+      const lines = [];
+      const result = await installDaemon({
+        transport, autoStart: true, env: fx.env({ PILOT_PROXY: value, ...extra }), home: fx.home, log: (line) => lines.push(line),
+      });
+      const [start] = fx.calls();
+      const label = `${value} ${transport}`;
+      assert.equal(start.env.PILOT_PROXY, '', label);
+      assert.equal(result.trust_verified, true, label);
+      assert.match(lines.join('\n'), /Warning: PILOT_PROXY is not a usable proxy setting .*setup starts the daemon without it \(auto\)/, label);
+      // Behind a proxy, auto applies: compat through HTTPS_PROXY.
+      assert.deepEqual(start.args, transport === 'udp' ? ['daemon', 'start'] : ['daemon', 'start', '--transport', 'compat'], label);
+      if (transport === 'compat') assert.equal(result.proxy, REDACTED, label);
+    }
+  }
+});
+
+test('PILOT_PROXY off aliases reach the daemon as "off", on every transport', { skip }, async (t) => {
+  for (const value of ['none', 'NONE', 'no', 'false', 'direct', 'Off']) {
+    for (const [transport, extra] of [['udp', {}], ['compat', { HTTPS_PROXY: PROXY }]]) {
+      const fx = fixture(t, PROXY_USAGE);
+      const lines = [];
+      const result = await installDaemon({
+        transport, autoStart: true, env: fx.env({ PILOT_PROXY: value, ...extra }), home: fx.home, log: (line) => lines.push(line),
+        upgradeRuntime: () => assert.fail('no proxy is in use'),
+      });
+      const [start] = fx.calls();
+      const label = `${value} ${transport}`;
+      // Before this, the daemon got "none" and dialed everything through http://none.
+      assert.equal(start.env.PILOT_PROXY, 'off', label);
+      assert.deepEqual(start.args, ['daemon', 'start'], label);
+      assert.equal(result.proxy, undefined, label);
+      assert.equal(result.trust_verified, true, label);
+      assert.doesNotMatch(lines.join('\n'), /Warning/, label);
+    }
+  }
+  // Valid settings pass through as they are; an unset one stays unset.
+  const fx = fixture(t, PROXY_USAGE);
+  await installDaemon({ transport: 'udp', autoStart: true, env: fx.env({ PILOT_PROXY: ' AUTO ' }), home: fx.home, log: () => {} });
+  await installDaemon({ transport: 'udp', autoStart: true, env: fx.env({}), home: fx.home, log: () => {} });
+  assert.deepEqual(fx.calls().filter((call) => call.args[0] === 'daemon').map((call) => call.env.PILOT_PROXY), ['auto', '<unset>']);
+});
+
+test('PILOT_TRANSPORT reaches pilotctl normalized, and an unusable one not at all', { skip }, async (t) => {
+  for (const [value, forwarded, warned] of [['COMPAT', 'compat', false], [' udp ', 'udp', false], ['tcp', '', true]]) {
+    const fx = fixture(t, PROXY_USAGE);
+    const lines = [];
+    const result = await installDaemon({ transport: 'udp', autoStart: true, env: fx.env({ PILOT_TRANSPORT: value }), home: fx.home, log: (line) => lines.push(line) });
+    const [start] = fx.calls();
+    assert.equal(start.env.PILOT_TRANSPORT, forwarded, value);
+    assert.equal(result.trust_verified, true, value);
+    if (warned) assert.match(lines.join('\n'), /Warning: PILOT_TRANSPORT="tcp" is not udp or compat; setup ignores it/);
+    else assert.doesNotMatch(lines.join('\n'), /Warning/, value);
+  }
+});
+
+test('a config.json "proxy" that pilotctl refuses is reported, whatever the transport', { skip }, async (t) => {
+  const withProxyKey = (fx, value) => {
+    const config = JSON.parse(readFileSync(fx.config, 'utf8'));
+    writeFileSync(fx.config, JSON.stringify({ ...config, proxy: value }));
+  };
+  for (const [value, pattern] of [
+    ['none', /"proxy": "none", which means "off", but pilotctl releases that know only "auto" and "off" refuse.*pilotctl config --set proxy=off/],
+    ['OFF', /"proxy": "OFF", which means "off".*pilotctl config --set proxy=off/],
+    ['Auto', /"proxy": "Auto", which means "auto".*pilotctl config --set proxy=auto/],
+    ['proxy.corp:3128', /has a "proxy" that is not a usable proxy setting \(not auto, off, or an http:\/\/ or https:\/\/ proxy URL\); pilotctl refuses/],
+  ]) {
+    for (const transport of ['udp', 'compat']) {
+      const fx = fixture(t, PROXY_USAGE);
+      withProxyKey(fx, value);
+      const plan = planDaemonStart({ transport, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home });
+      assert.match(plan.warnings.join('\n'), pattern, `${value} ${transport}`);
+      assert.equal(JSON.parse(readFileSync(fx.config, 'utf8')).proxy, value);
+    }
+  }
+  // An alias pilotctl may refuse still plans as what it means.
+  const fx = fixture(t, PROXY_USAGE);
+  withProxyKey(fx, 'none');
+  assert.equal(planDaemonStart({ transport: 'compat', env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home }).mode, 'default');
+  // "auto", "off" and a URL are accepted everywhere: no warning.
+  for (const value of ['auto', 'off', 'http://egress2.corp:8080']) {
+    withProxyKey(fx, value);
+    assert.deepEqual(planDaemonStart({ transport: 'udp', env: fx.env({}), home: fx.home }).warnings, [], value);
+  }
+});
+
+test('compat without a proxy: the hint and the summary match what the installed runtime does', { skip }, async (t) => {
+  // A released runtime before -proxy (v1.13.9) ignores PILOT_TRANSPORT: its
+  // daemon's -transport defaults to udp. Only config.json switches it, and
+  // its pilotctl passes config.json's raw-TCP registry explicitly.
+  let fx = fixture(t, LEGACY_USAGE);
+  let lines = [];
+  let result = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ PILOT_TRANSPORT: 'compat' }), home: fx.home, log: (line) => lines.push(line),
+    upgradeRuntime: () => assert.fail('no proxy need'),
+  });
+  let output = lines.join('\n');
+  assert.equal(result.transport, 'udp');
+  assert.deepEqual(fx.calls()[0].args, ['daemon', 'start']);
+  assert.match(output, /Warning: PILOT_TRANSPORT=compat has no effect: the installed pilot-daemon predates it and runs udp/);
+  assert.match(output, /pilotctl config --set transport=compat/);
+  assert.match(output, /pilotctl config --set registry=registry\.pilotprotocol\.network:443/);
+  assert.match(output, /pilotctl daemon stop && pilotctl daemon start/);
+  assert.doesNotMatch(output, /set PILOT_TRANSPORT=compat/);
+
+  // Once config.json says compat, that runtime runs compat, and says so.
+  writeFileSync(fx.config, JSON.stringify({ ...JSON.parse(readFileSync(fx.config, 'utf8')), transport: 'compat' }));
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ PILOT_TRANSPORT: 'compat' }), home: fx.home, log: (line) => lines.push(line) });
+  assert.equal(result.transport, 'compat');
+  assert.doesNotMatch(lines.join('\n'), /has no effect|pilotctl config --set transport/);
+
+  // The probe alone on that runtime: the same hint, no PILOT_TRANSPORT advice.
+  fx = fixture(t, LEGACY_USAGE);
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({}), home: fx.home, log: (line) => lines.push(line) });
+  output = lines.join('\n');
+  assert.equal(result.transport, 'udp');
+  assert.match(output, /No egress proxy is in use.*\n.*\n.*pilotctl config --set transport=compat/);
+  assert.match(output, /pilotctl config --set registry=registry\.pilotprotocol\.network:443/);
+  assert.doesNotMatch(output, /PILOT_TRANSPORT/);
+
+  // A runtime with -proxy applies PILOT_TRANSPORT, so compat is what runs.
+  fx = fixture(t, PROXY_USAGE);
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ PILOT_TRANSPORT: 'compat' }), home: fx.home, log: (line) => lines.push(line) });
+  assert.equal(result.transport, 'compat');
+  assert.equal(fx.calls()[0].env.PILOT_TRANSPORT, 'compat');
+  assert.doesNotMatch(lines.join('\n'), /has no effect|pilotctl config --set/);
+
+  // And its pilotctl leaves the default registry out in compat mode itself.
+  fx = fixture(t, PROXY_USAGE);
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({}), home: fx.home, log: (line) => lines.push(line) });
+  output = lines.join('\n');
+  assert.equal(result.transport, 'udp');
+  assert.match(output, /pilotctl config --set transport=compat/);
+  assert.doesNotMatch(output, /registry=|PILOT_TRANSPORT/);
+});
+
 test('the daemon\'s config.json "proxy" key is honoured, never overridden', { skip }, async (t) => {
   const withProxyKey = (fx, value) => {
     const config = JSON.parse(readFileSync(fx.config, 'utf8'));
@@ -291,7 +436,7 @@ test('the daemon\'s config.json "proxy" key is honoured, never overridden', { sk
   const plan = planDaemonStart({ transport: 'compat', env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home });
   assert.equal(plan.mode, 'compat-proxy');
   assert.equal(plan.source, 'HTTPS_PROXY');
-  assert.match(plan.warnings.join('\n'), /^config\.json proxy is not a usable proxy \(unsupported scheme "socks5".*pilotctl config --set proxy=/);
+  assert.match(plan.warnings.join('\n'), /config\.json has a "proxy" that is not a usable proxy setting \(unsupported scheme "socks5".*pilotctl refuses to start the daemon.*pilotctl config --set proxy=/);
   assert.doesNotMatch(plan.warnings.join('\n'), /s3cr3t/);
 });
 
@@ -429,7 +574,23 @@ test('doctor reports the proxy, ignored settings and the recorded transport with
   assert.equal(report.network.daemon_proxy_support, true);
   assert.equal(report.network.warnings.length, 1);
   assert.match(report.network.warnings[0], /^HTTP_PROXY is not a usable proxy/);
+  assert.equal(report.network.mode, 'auto');
   assert.doesNotMatch(stdout, /s3cr3t|muse-agent/);
+
+  // An off alias shows as off, with where it came from, not as a bare null.
+  const off = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'doctor', '--json'], { env: { ...env, PILOT_PROXY: 'none' } })).stdout);
+  assert.equal(off.network.proxy, null);
+  assert.equal(off.network.mode, 'off');
+  assert.equal(off.network.setting, 'PILOT_PROXY');
+  const text = (await promisify(execFile)(process.execPath, [cli, 'doctor'], { env: { ...env, PILOT_PROXY: 'none' } })).stdout;
+  assert.match(text, /^Egress proxy: off \(PILOT_PROXY\)$/m);
+  // A setting pilot-daemon would refuse is reported, without its credentials.
+  const refused = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'doctor', '--json'], {
+    env: { ...env, PILOT_PROXY: 'socks5://muse-agent:s3cr3t@proxy:1080' },
+  })).stdout);
+  assert.equal(refused.network.proxy, REDACTED);
+  assert.match(refused.network.warnings.join('\n'), /^PILOT_PROXY is not a usable proxy setting .*pilot-daemon would refuse it/m);
+  assert.doesNotMatch(JSON.stringify(refused), /s3cr3t|muse-agent/);
 });
 
 // fixture builds a HOME with a Pilot config plus a fake pilotctl (recording
@@ -448,12 +609,23 @@ function fixture(t, usage) {
   writeFileSync(config, JSON.stringify({ registry: '34.71.57.205:9000', email: 'agent@example.com' }, null, 2));
   const log = join(work, 'pilotctl.log');
   const pilotctl = join(bin, 'pilotctl');
+  // `daemon start` refuses what pilot-daemon's -proxy and pilotctl's
+  // transport check refuse, as the real ones do on every transport, and a
+  // daemon that did not start answers no send-message.
+  const dead = join(work, 'daemon-dead');
   writeFileSync(pilotctl, `#!/bin/sh
 {
   printf 'ARGS'; for arg in "$@"; do printf '\\t%s' "$arg"; done; printf '\\n'
-  printf 'ENV\\tHTTPS_PROXY=%s\\tNO_PROXY=%s\\tPILOT_PROXY=%s\\n' "\${HTTPS_PROXY-}" "\${NO_PROXY-}" "\${PILOT_PROXY-}"
+  printf 'ENV\\tHTTPS_PROXY=%s\\tNO_PROXY=%s\\tPILOT_PROXY=%s\\tPILOT_TRANSPORT=%s\\n' "\${HTTPS_PROXY-}" "\${NO_PROXY-}" "\${PILOT_PROXY-<unset>}" "\${PILOT_TRANSPORT-<unset>}"
 } >> '${log}'
-if [ "$1" = send-message ]; then printf '%s\\n' '{"ok":true,"data":{"items":[]}}'; fi
+if [ "$1 $2" = "daemon start" ]; then
+  case "\${PILOT_TRANSPORT-}" in ''|udp|compat) ;; *) echo "daemon start: invalid transport" >&2; : > '${dead}'; exit 1 ;; esac
+  case "\${PILOT_PROXY-}" in ''|auto|off|http://?*|https://?*) ;; *) echo "-proxy: invalid proxy" >&2; : > '${dead}'; exit 1 ;; esac
+fi
+if [ "$1" = send-message ]; then
+  if [ -e '${dead}' ]; then printf '%s\\n' '{"ok":false}'; exit 1; fi
+  printf '%s\\n' '{"ok":true,"data":{"items":[]}}'
+fi
 exit 0
 `);
   chmodSync(pilotctl, 0o755);
