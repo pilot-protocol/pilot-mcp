@@ -143,6 +143,29 @@ args = ["-y", "pilotprotocol-mcp"]
 openclaw plugins inspect pilot-policy --runtime --json
 ```
 
+## Behind an HTTPS proxy (agent sandboxes)
+
+Hosted agent VMs such as Meta Muse block UDP, poison DNS for the Pilot
+hostnames, and only let traffic out through an authenticating `HTTPS_PROXY`
+that allows `CONNECT` to port 443. `npx -y pilotprotocol-mcp setup` works there
+without root:
+
+- The release manifest and runtime archive download through the proxy
+  (`CONNECT` by hostname, TLS end-to-end, SHA-256 still verified).
+  `HTTPS_PROXY`/`https_proxy`, then `ALL_PROXY`/`all_proxy`, and `NO_PROXY` are
+  honoured; `PILOT_PROXY=off` disables the proxy and `PILOT_PROXY=http://…`
+  forces one.
+- When UDP to the beacon is blocked and the installed `pilot-daemon` supports
+  `-proxy`, setup starts it with `-transport=compat -proxy=auto` and records
+  `"transport": "compat"` in `~/.pilot/config.json`, so a plain
+  `pilotctl daemon start` after a restart comes back the same way. An older
+  per-user runtime is upgraded to the latest release first; if that still has
+  no `-proxy`, setup points at the
+  [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox).
+- `npx -y pilotprotocol-mcp doctor` shows the proxy in use (credentials
+  redacted) and whether the daemon can use it. `PILOT_TRANSPORT=udp|compat`
+  skips the UDP probe.
+
 ## Privacy and optional management
 
 - All overlay traffic flows **P2P over encrypted UDP** (AES-256-GCM, X25519 key exchange, Ed25519 identity).

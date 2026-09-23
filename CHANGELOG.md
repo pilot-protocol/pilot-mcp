@@ -6,6 +6,27 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 
 ## [Unreleased]
 
+### Fixed
+- `setup` now works from proxy-only agent sandboxes such as Meta Muse. The
+  runtime manifest and archive downloads honour `HTTPS_PROXY`/`https_proxy`,
+  `ALL_PROXY`/`all_proxy` and `NO_PROXY` (Node's built-in fetch ignores them),
+  tunnelling with `CONNECT` by hostname so poisoned local DNS is never
+  consulted; TLS stays end-to-end and the archive SHA-256 check is unchanged.
+  Proxy credentials are redacted from every message. Hosts that set
+  `HTTPS_PROXY` but relied on direct downloads can set `PILOT_PROXY=off`.
+- The UDP transport probe sends the beacon's real discover message. The old
+  payload was never answered, so every network was reported as UDP-blocked.
+
+### Added
+- With a proxy configured and UDP blocked, `setup` starts a `pilot-daemon` that
+  supports `-proxy` with `-transport=compat -proxy=auto`, forwards the proxy
+  environment, and records `"transport": "compat"` in `~/.pilot/config.json`.
+  An older per-user runtime is upgraded to the latest release first; otherwise
+  the start is unchanged and setup points at the pilot-sandbox skill.
+- `doctor` reports the egress proxy (redacted) and whether the daemon supports
+  `-proxy`. `PILOT_PROXY=auto|off|URL` and `PILOT_TRANSPORT=udp|compat` are
+  honoured by setup.
+
 ## [0.2.13] - 2026-08-07
 
 ### Fixed

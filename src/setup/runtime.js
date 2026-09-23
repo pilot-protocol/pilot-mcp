@@ -15,7 +15,8 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import process from 'node:process';
 import { URL } from 'node:url';
-import { pilotctlBinaryPath } from '../daemon-bridge.js';
+import { daemonBinaryPath, pilotctlBinaryPath } from '../daemon-bridge.js';
+import { proxyAwareFetch } from '../netproxy.js';
 
 const DEFAULT_MANIFEST = 'https://pilotprotocol.network/.well-known/latest.json';
 const MAX_RUNTIME_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -41,14 +42,27 @@ const MANAGED_RUNTIME = Object.freeze({
   }),
 });
 
-export async function ensurePilotRuntime({ requireManaged = false, home = homedir(), fetchImpl = fetch } = {}) {
+// Downloads go through proxyAwareFetch: in proxy-only sandboxes (Meta Muse)
+// the manifest and archive are fetched via the HTTPS_PROXY CONNECT tunnel,
+// and the archive is still checked against the pinned SHA-256 either way.
+//
+// requireProxy asks for a runtime whose pilot-daemon supports -proxy. Only
+// the per-user runtime in ~/.pilot/bin is replaced, by the latest stable
+// release and only when that is not already the installed one; a runtime the
+// user installed elsewhere (brew, $PATH, PILOTCTL_BIN) is left alone.
+export async function ensurePilotRuntime({ requireManaged = false, requireProxy = false, home = homedir(), fetchImpl = proxyAwareFetch } = {}) {
   let existing = null;
   try {
     existing = pilotctlBinaryPath();
   } catch {
     // A first install is expected not to have a runtime yet.
   }
-  if (existing && (!requireManaged || supportsManagedAdoption(existing))) return existing;
+  if (existing
+    && (!requireManaged || supportsManagedAdoption(existing))
+    && (!requireProxy || supportsEgressProxy(daemonBinaryPath(existing)))) return existing;
+
+  const proxyUpgrade = requireProxy && !requireManaged && Boolean(existing);
+  if (proxyUpgrade && existing !== join(home, '.pilot', 'bin', 'pilotctl')) return existing;
 
   let release;
   if (requireManaged) {
@@ -58,6 +72,7 @@ export async function ensurePilotRuntime({ requireManaged = false, home = homedi
     const manifest = await fetchJSON(fetchImpl, manifestURL);
     release = validateRuntimeManifest(manifest);
   }
+  if (proxyUpgrade && installedRuntimeTag(home) === release.tag) return existing;
   const archive = await fetchBytes(fetchImpl, release.url);
   const digest = createHash('sha256').update(archive).digest('hex');
   if (digest !== release.sha256) throw new Error('Pilot runtime archive checksum did not match the pinned distribution digest');
@@ -103,6 +118,23 @@ export function supportsManagedAdoption(binary) {
     encoding: 'utf8', env: environment, timeout: 5_000,
   });
   return `${probe.stdout ?? ''}\n${probe.stderr ?? ''}`.includes('PILOT_ENROLLMENT_TOKEN');
+}
+
+// supportsEgressProxy reports whether a pilot-daemon understands -proxy,
+// i.e. can reach the registry and beacon through HTTPS_PROXY. Go's flag
+// package lists every flag on its own line as "  -name type" under -h.
+export function supportsEgressProxy(daemon) {
+  if (!daemon || !existsSync(daemon)) return false;
+  const probe = spawnSync(daemon, ['-h'], { encoding: 'utf8', timeout: 5_000 });
+  return /^\s*-proxy\b(?!-)/m.test(`${probe.stdout ?? ''}\n${probe.stderr ?? ''}`);
+}
+
+function installedRuntimeTag(home) {
+  try {
+    return readFileSync(join(home, '.pilot', 'bin', '.pilot-version'), 'utf8').trim();
+  } catch {
+    return '';
+  }
 }
 
 export function validateRuntimeManifest(manifest, platform = process.platform, arch = process.arch) {

@@ -4,7 +4,8 @@
 //   1. Capture email + hostname (interactive prompts OR PILOT_EMAIL/PILOT_HOSTNAME env).
 //   2. Extract pilot-daemon + pilotctl binaries from the platform subpackage to ~/.pilot/bin/.
 //   3. Write ~/.pilot/config.json.
-//   4. Probe UDP transport to beacon; fall back to compat mode if blocked.
+//   4. Probe UDP transport to beacon; fall back to compat mode if blocked
+//      (through HTTPS_PROXY when one is set and the daemon supports -proxy).
 //   5. Install AND load the daemon service (launchd plist / systemd unit).
 //   6. Start daemon, wait for rendezvous registration, fetch pilot address.
 //   7. Auto-detect installed harnesses.
@@ -20,7 +21,7 @@ import { join } from 'node:path';
 import { execPilotctl } from '../daemon-bridge.js';
 import { ensurePilotRuntime } from './runtime.js';
 import { detectHarnesses } from './detect.js';
-import { installDaemon } from './daemon.js';
+import { installDaemon, PILOT_SANDBOX_SKILL_URL } from './daemon.js';
 import { writeIdentity } from './identity.js';
 import { probeTransport } from './transport.js';
 import harnesses from './harnesses/index.js';
@@ -57,6 +58,8 @@ export async function runSetup(flags) {
       const daemon = await installDaemon({ transport: opts.transport, autoStart: true, enterpriseControl: opts.enterpriseControl });
       opts.trust_verified = daemon.trust_verified === true;
       opts.address = daemon.address;
+      opts.proxy = daemon.proxy;
+      opts.proxy_supported = daemon.proxy_supported;
     } catch (error) {
       // Harness attachment remains useful and is safe in unmanaged pass-through
       // mode. Do not abort before writing adapters merely because the separate
@@ -119,6 +122,9 @@ export async function runSetup(flags) {
   log(`  Address:   ${opts.address ?? '(fetching…)'}`);
   log(`  Hostname:  ${opts.hostname}`);
   log(`  Transport: ${opts.transport}`);
+  if (opts.proxy) {
+    log(`  Proxy:     ${opts.proxy}${opts.proxy_supported ? '' : ` (daemon lacks -proxy; see ${PILOT_SANDBOX_SKILL_URL})`}`);
+  }
   log(`  Configured: ${configured.join(', ') || '(none)'}`);
   if (skipped.length) log(`  Skipped:    ${skipped.join(', ')}`);
   log('');
