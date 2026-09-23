@@ -147,24 +147,37 @@ openclaw plugins inspect pilot-policy --runtime --json
 
 Hosted agent VMs such as Meta Muse block UDP, poison DNS for the Pilot
 hostnames, and only let traffic out through an authenticating `HTTPS_PROXY`
-that allows `CONNECT` to port 443. `npx -y pilotprotocol-mcp setup` works there
-without root:
+that allows `CONNECT` to port 443. `npx -y pilotprotocol-mcp setup` works
+there, as a normal user or as root, and needs no systemd or launchd:
 
 - The release manifest and runtime archive download through the proxy
-  (`CONNECT` by hostname, TLS end-to-end, SHA-256 still verified).
-  `HTTPS_PROXY`/`https_proxy`, then `ALL_PROXY`/`all_proxy`, and `NO_PROXY` are
-  honoured; `PILOT_PROXY=off` disables the proxy and `PILOT_PROXY=http://…`
-  forces one.
-- When UDP to the beacon is blocked and the installed `pilot-daemon` supports
-  `-proxy`, setup starts it with `-transport=compat -proxy=auto` and records
-  `"transport": "compat"` in `~/.pilot/config.json`, so a plain
-  `pilotctl daemon start` after a restart comes back the same way. An older
-  per-user runtime is upgraded to the latest release first; if that still has
-  no `-proxy`, setup points at the
+  (`CONNECT` by hostname, TLS end-to-end, SHA-256 still verified). Proxy
+  selection matches `pilot-daemon -proxy`: the first non-empty of
+  `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy` (plain `http://` uses
+  `HTTP_PROXY`/`http_proxy` first), with `NO_PROXY`/`no_proxy` honoured and
+  localhost/loopback never proxied. `PILOT_PROXY=off` (or `none`, `false`,
+  `direct`) disables the proxy and `PILOT_PROXY=[http://]host:port` forces one.
+  A value that is not a usable http(s) proxy is ignored with a warning; it
+  never stops setup.
+- When UDP to the beacon is blocked (three probes, no answer) and the installed
+  `pilot-daemon` supports `-proxy`, setup starts it with `-transport=compat`.
+  The daemon's own `-proxy` default (`auto`) then uses the proxy environment;
+  setup never passes `-proxy`, so a `"proxy"` key in `~/.pilot/config.json` or
+  `PILOT_PROXY` still wins. Setup records `"transport": "compat"` in
+  `~/.pilot/config.json`, marked `"transport_set_by": "pilot-mcp"`, so a plain
+  `pilotctl daemon start` after a restart comes back the same way; a later
+  setup that finds UDP working, or no proxy, removes it again. A `"transport"`
+  you (or `install.sh`) set is never changed.
+- An older per-user runtime (`~/.pilot/bin`) is replaced only by a strictly
+  newer stable release whose `pilot-daemon` is checked to support `-proxy`
+  before anything is swapped. A managed node's pinned runtime, a runtime of
+  unknown version, and a runtime installed elsewhere are never replaced.
+  Otherwise setup keeps the runtime and points at the
   [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox).
-- `npx -y pilotprotocol-mcp doctor` shows the proxy in use (credentials
-  redacted) and whether the daemon can use it. `PILOT_TRANSPORT=udp|compat`
-  skips the UDP probe.
+- `npx -y pilotprotocol-mcp doctor` shows the proxy the daemon would use
+  (credentials redacted), whether the daemon can use it, any ignored proxy
+  setting, and the recorded transport. `PILOT_TRANSPORT=udp|compat` skips the
+  UDP probe.
 
 ## Privacy and optional management
 

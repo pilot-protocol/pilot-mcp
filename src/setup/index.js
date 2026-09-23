@@ -19,6 +19,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execPilotctl } from '../daemon-bridge.js';
+import { inspectProxy } from '../netproxy.js';
 import { ensurePilotRuntime } from './runtime.js';
 import { detectHarnesses } from './detect.js';
 import { installDaemon, PILOT_SANDBOX_SKILL_URL } from './daemon.js';
@@ -30,6 +31,9 @@ export async function runSetup(flags) {
   const opts = await resolveOptions(flags);
 
   await step('1', 'Pilot runtime', async () => {
+    // Proxy settings never stop setup: an unusable value is ignored with a
+    // warning, and downloads fall back to the proxy environment or go direct.
+    for (const warning of inspectProxy(process.env).warnings) log(`  Warning: ${warning}`);
     const binary = await ensurePilotRuntime({ requireManaged: Boolean(opts.managedURL) });
     log(`  Verified runtime: ${binary}`);
   });
@@ -49,7 +53,9 @@ export async function runSetup(flags) {
 	await step(opts.managedURL ? '4' : '3', 'Transport', async () => {
     opts.transport = await probeTransport();
     if (opts.transport === 'compat') {
-      log('  UDP appears blocked. Falling back to compat mode (TCP/443 via WSS).');
+      log(String(process.env.PILOT_TRANSPORT ?? '').trim()
+        ? '  PILOT_TRANSPORT=compat: compat mode (WSS over TCP/443).'
+        : '  UDP to the beacon appears blocked (no reply to 3 probes).');
     }
   });
 
@@ -58,6 +64,7 @@ export async function runSetup(flags) {
       const daemon = await installDaemon({ transport: opts.transport, autoStart: true, enterpriseControl: opts.enterpriseControl });
       opts.trust_verified = daemon.trust_verified === true;
       opts.address = daemon.address;
+      opts.transport = daemon.transport ?? opts.transport;
       opts.proxy = daemon.proxy;
       opts.proxy_supported = daemon.proxy_supported;
     } catch (error) {

@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -17,11 +17,15 @@ import { join } from 'node:path';
 import {
   configuredProxy,
   createProxyAwareFetch,
+  inspectProxy,
   redactProxyURL,
   resolveProxy,
 } from '../src/netproxy.js';
 
 const CREDENTIALS = 'muse-agent:s3cr3t/p@ss';
+// Fake pilot-daemon scripts: Go's flag package prints -h usage on stderr.
+const PROXY_DAEMON = '#!/bin/sh\necho "  -proxy string" >&2\n';
+const LEGACY_DAEMON = '#!/bin/sh\necho "  -transport string" >&2\n';
 const PROXY_USERINFO = 'muse-agent:s3cr3t%2Fp%40ss';
 
 test('HTTPS targets use HTTPS_PROXY, then https_proxy, then ALL_PROXY', () => {
@@ -29,15 +33,51 @@ test('HTTPS targets use HTTPS_PROXY, then https_proxy, then ALL_PROXY', () => {
   assert.equal(resolveProxy(target, { HTTPS_PROXY: 'http://a:1', https_proxy: 'http://b:2', ALL_PROXY: 'http://c:3' }).host, 'a:1');
   assert.equal(resolveProxy(target, { https_proxy: 'http://b:2', ALL_PROXY: 'http://c:3' }).host, 'b:2');
   assert.equal(resolveProxy(target, { all_proxy: 'http://c:3' }).host, 'c:3');
+  assert.equal(resolveProxy(target, { HTTPS_PROXY: '  ', all_proxy: 'http://c:3' }).host, 'c:3');
   assert.equal(resolveProxy(target, { HTTP_PROXY: 'http://d:4' }), null);
-  assert.equal(resolveProxy('http://example.com/', { HTTP_PROXY: 'http://d:4', HTTPS_PROXY: 'http://a:1' }).host, 'd:4');
   assert.equal(resolveProxy(target, {}), null);
 });
 
-test('scheme-less proxy values are HTTP proxies and unusable ones fall back to direct', () => {
+test('plain http targets prefer HTTP_PROXY and otherwise use the HTTPS proxy, as common/netproxy does', () => {
+  assert.equal(resolveProxy('http://example.com/', { HTTP_PROXY: 'http://d:4', HTTPS_PROXY: 'http://a:1' }).host, 'd:4');
+  assert.equal(resolveProxy('http://example.com/', { http_proxy: 'http://e:5', HTTPS_PROXY: 'http://a:1' }).host, 'e:5');
+  assert.equal(resolveProxy('http://example.com/', { HTTPS_PROXY: 'http://a:1' }).host, 'a:1');
+  // Under CGI a request header could set HTTP_PROXY, so it is ignored.
+  assert.equal(resolveProxy('http://example.com/', { HTTP_PROXY: 'http://d:4', HTTPS_PROXY: 'http://a:1', REQUEST_METHOD: 'GET' }).host, 'a:1');
+  // An unusable HTTP_PROXY costs only itself, never the HTTPS proxy.
+  const settings = inspectProxy({ HTTP_PROXY: 'socks5://d:4', HTTPS_PROXY: 'http://a:1' });
+  assert.equal(settings.proxy.url.host, 'a:1');
+  assert.equal(resolveProxy('http://example.com/', { HTTP_PROXY: 'socks5://d:4', HTTPS_PROXY: 'http://a:1' }).host, 'a:1');
+  assert.match(settings.warnings.join('\n'), /HTTP_PROXY is not a usable proxy \(unsupported scheme "socks5"/);
+});
+
+test('the first non-empty proxy variable decides; an unusable one means no proxy, with a warning', () => {
   assert.equal(resolveProxy('https://github.com/', { HTTPS_PROXY: 'proxy.internal:3128' }).href, 'http://proxy.internal:3128/');
   assert.equal(resolveProxy('https://github.com/', { ALL_PROXY: 'socks5://127.0.0.1:1080' }), null);
-  assert.equal(resolveProxy('https://github.com/', { HTTPS_PROXY: 'socks5://127.0.0.1:1080', ALL_PROXY: 'http://c:3' }).host, 'c:3');
+  // Go's netproxy takes the first non-empty variable; skipping to ALL_PROXY
+  // here would route setup through a proxy the daemon does not use.
+  const env = { HTTPS_PROXY: 'socks5://user:s3cr3t@127.0.0.1:1080', ALL_PROXY: 'http://c:3' };
+  assert.equal(resolveProxy('https://github.com/', env), null);
+  assert.equal(configuredProxy(env), null);
+  const { warnings } = inspectProxy(env);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^HTTPS_PROXY is not a usable proxy \(unsupported scheme "socks5", want http or https\)/);
+  assert.doesNotMatch(warnings[0], /s3cr3t|user/);
+});
+
+test('credentials that are not percent-encoded are rejected instead of becoming the proxy host', () => {
+  for (const value of [
+    'http://abcDEF/ghi+jkl@proxy.muse:3128',
+    'http://user:9876/zz@proxy:3128',
+    'http://user:9876?zz@proxy:3128',
+    'http://user:98#76@proxy:3128',
+  ]) {
+    const { proxy, warnings } = inspectProxy({ HTTPS_PROXY: value });
+    assert.equal(proxy, null, value);
+    assert.match(warnings.join('\n'), /percent-encoded|malformed/, value);
+    assert.doesNotMatch(warnings.join('\n'), /abcDEF|ghi|9876|zz|user/, value);
+  }
+  assert.equal(configuredProxy({ HTTPS_PROXY: `http://${PROXY_USERINFO}@proxy:3128` }).url.hostname, 'proxy');
 });
 
 test('NO_PROXY follows the Go httpproxy matching rules', () => {
@@ -55,20 +95,51 @@ test('NO_PROXY follows the Go httpproxy matching rules', () => {
   assert.equal(direct('https://10.1.2.3/', '10.0.0.0/8'), true);
   assert.equal(direct('https://11.1.2.3/', '10.0.0.0/8'), false);
   assert.equal(direct('https://[2001:db8::1]/', '2001:db8::/32'), true);
+  assert.equal(direct('https://[2001:db8::1]/', '2001:0db8:0:0:0:0:0:1'), true);
   assert.equal(direct('https://192.0.2.7/', '192.0.2.7'), true);
+  assert.equal(direct('https://192.0.2.7/', '192.0.2.7:8443'), false);
+  assert.equal(direct('https://192.0.2.7/', '192.0.2.7:443'), true);
   assert.equal(direct('https://github.com/', 'example.com, ,other.test'), false);
+  assert.equal(direct('https://github.com/', 'example.com github.com'), true);
   assert.equal(resolveProxy('https://github.com/', { HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'github.com' }), null);
-  assert.equal(resolveProxy('https://localhost:8443/', { HTTPS_PROXY: 'http://proxy:3128' }), null);
-  assert.equal(resolveProxy('https://127.0.0.1/', { HTTPS_PROXY: 'http://proxy:3128' }), null);
+  // The first non-empty of NO_PROXY/no_proxy applies, as in Go.
+  assert.equal(resolveProxy('https://github.com/', { HTTPS_PROXY: 'http://proxy:3128', NO_PROXY: '', no_proxy: 'github.com' }), null);
+  assert.notEqual(resolveProxy('https://github.com/', { HTTPS_PROXY: 'http://proxy:3128', NO_PROXY: 'other.test', no_proxy: 'github.com' }), null);
+});
+
+test('localhost and loopback addresses are never proxied, whatever the mode', () => {
+  for (const env of [{ HTTPS_PROXY: 'http://proxy:3128' }, { PILOT_PROXY: 'http://explicit:2' }]) {
+    for (const target of ['https://localhost:8443/', 'https://127.0.0.1/', 'https://127.8.9.10/', 'https://[::1]/', 'https://[::ffff:127.0.0.1]/']) {
+      assert.equal(resolveProxy(target, env), null, `${target} ${JSON.stringify(env)}`);
+    }
+    assert.notEqual(resolveProxy('https://github.com/', env), null);
+  }
 });
 
 test('PILOT_PROXY selects auto, off, or an explicit proxy', () => {
   const env = { HTTPS_PROXY: 'http://env:1', NO_PROXY: 'github.com' };
   assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: 'auto' }).host, 'env:1');
-  assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: 'off' }), null);
+  assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: 'AUTO' }).host, 'env:1');
+  for (const off of ['off', 'OFF', 'none', 'false', 'direct']) {
+    assert.equal(resolveProxy('https://pilotprotocol.network/', { ...env, PILOT_PROXY: off }), null, off);
+    assert.equal(inspectProxy({ ...env, PILOT_PROXY: off }).mode, 'off', off);
+  }
+  // An explicit proxy applies to every target; NO_PROXY does not exempt any.
   assert.equal(resolveProxy('https://github.com/', { ...env, PILOT_PROXY: 'https://u:p@explicit:2' }).host, 'explicit:2');
-  assert.throws(() => resolveProxy('https://github.com/', { PILOT_PROXY: 'explicit:2' }), /PILOT_PROXY must be/);
-  assert.throws(() => resolveProxy('https://github.com/', { PILOT_PROXY: 'socks5://explicit:2' }), /PILOT_PROXY must be/);
+  // Like Go's netproxy.Explicit, a missing scheme means http.
+  assert.equal(resolveProxy('https://github.com/', { PILOT_PROXY: 'proxy.corp:3128' }).href, 'http://proxy.corp:3128/');
+});
+
+test('an unusable PILOT_PROXY never throws: it is ignored with a warning and auto applies', () => {
+  for (const value of ['socks5://explicit:2', 'http://', 'http://u:s3cr3t@:3128']) {
+    assert.doesNotThrow(() => resolveProxy('https://github.com/', { PILOT_PROXY: value }));
+    assert.equal(resolveProxy('https://github.com/', { PILOT_PROXY: value }), null, value);
+    assert.equal(resolveProxy('https://github.com/', { PILOT_PROXY: value, HTTPS_PROXY: 'http://env:1' }).host, 'env:1', value);
+    const { mode, warnings } = inspectProxy({ PILOT_PROXY: value });
+    assert.equal(mode, 'auto', value);
+    assert.match(warnings.join('\n'), /^PILOT_PROXY is not a usable proxy/, value);
+    assert.doesNotMatch(warnings.join('\n'), /s3cr3t/);
+  }
 });
 
 test('configuredProxy names the proxy setup must route the daemon through', () => {
@@ -79,6 +150,13 @@ test('configuredProxy names the proxy setup must route the daemon through', () =
   assert.equal(selected.source, 'https_proxy');
   assert.equal(selected.url.host, 'a:1');
   assert.equal(configuredProxy({ HTTPS_PROXY: 'http://a:1', PILOT_PROXY: 'http://b:2' }).source, 'PILOT_PROXY');
+  // A daemon config.json "proxy" is applied ahead of $PILOT_PROXY.
+  const fromConfig = configuredProxy({ HTTPS_PROXY: 'http://a:1', PILOT_PROXY: 'http://b:2' }, { spec: 'http://c:3', specSource: 'config.json proxy' });
+  assert.equal(fromConfig.source, 'config.json proxy');
+  assert.equal(fromConfig.url.host, 'c:3');
+  assert.equal(configuredProxy({ HTTPS_PROXY: 'http://a:1' }, { spec: 'off' }), null);
+  assert.equal(configuredProxy({ HTTPS_PROXY: 'http://a:1' }, { spec: 'auto' }).source, 'HTTPS_PROXY');
+  assert.equal(configuredProxy({ HTTPS_PROXY: 'http://a:1', PILOT_PROXY: 'off' }, { spec: '' }), null);
 });
 
 test('proxy URLs are redacted before they reach logs', () => {
@@ -166,7 +244,7 @@ test('setup downloads the runtime through the proxy and keeps the checksum gate'
   const result = await release.install(home);
   assert.equal(result.ok, true, result.error);
   assert.equal(result.path, join(home, '.pilot', 'bin', 'pilotctl'));
-  assert.equal(readFileSync(join(home, '.pilot', 'bin', 'pilot-daemon'), 'utf8'), '#!/bin/sh\necho daemon\n');
+  assert.equal(readFileSync(join(home, '.pilot', 'bin', 'pilot-daemon'), 'utf8'), PROXY_DAEMON);
   assert.equal(readFileSync(join(home, '.pilot', 'bin', '.pilot-version'), 'utf8'), `${tag}\n`);
   assert.deepEqual(proxy.log, [
     { authority: 'pilotprotocol.network:443', authorized: true },
@@ -193,34 +271,100 @@ test('setup downloads the runtime through the proxy and keeps the checksum gate'
   assert.doesNotMatch(refused.error, /nope|muse-agent/);
 });
 
-test('a per-user runtime without -proxy is upgraded through the proxy once', { timeout: 60_000 }, async (t) => {
+test('a per-user runtime without -proxy is upgraded through the proxy only to a newer release with -proxy', { timeout: 60_000 }, async (t) => {
   const release = await startReleaseMirror(t);
   if (!release) return;
-  const legacy = (name, tag) => {
+  const legacy = (name, tag, extra = () => {}) => {
     const home = release.home(name);
     const bin = join(home, '.pilot', 'bin');
     mkdirSync(bin, { recursive: true });
     for (const binary of ['pilotctl', 'pilot-daemon']) {
-      writeFileSync(join(bin, binary), '#!/bin/sh\necho "  -transport string" >&2\n');
+      writeFileSync(join(bin, binary), LEGACY_DAEMON);
       chmodSync(join(bin, binary), 0o755);
     }
-    writeFileSync(join(bin, '.pilot-version'), `${tag}\n`);
+    if (tag !== null) writeFileSync(join(bin, '.pilot-version'), `${tag}\n`);
+    extra(home);
     return home;
   };
+  const daemonOf = (home) => readFileSync(join(home, '.pilot', 'bin', 'pilot-daemon'), 'utf8');
+  const versionOf = (home) => readFileSync(join(home, '.pilot', 'bin', '.pilot-version'), 'utf8').trim();
+  const stagesOf = (home) => readdirSync(join(home, '.pilot')).filter((name) => name.startsWith('.runtime-stage-'));
 
   const outdated = legacy('outdated', 'v1.13.9');
-  const upgraded = await release.install(outdated, { requireProxy: true });
+  const upgraded = await release.upgrade(outdated);
   assert.equal(upgraded.ok, true, upgraded.error);
-  assert.equal(readFileSync(join(outdated, '.pilot', 'bin', 'pilot-daemon'), 'utf8'), '#!/bin/sh\necho daemon\n');
-  assert.equal(readFileSync(join(outdated, '.pilot', 'bin', '.pilot-version'), 'utf8'), `${release.tag}\n`);
+  assert.deepEqual(upgraded.result, { upgraded: true, path: join(outdated, '.pilot', 'bin', 'pilotctl'), from: 'v1.13.9', to: release.tag });
+  assert.equal(daemonOf(outdated), PROXY_DAEMON);
+  assert.equal(versionOf(outdated), release.tag);
+  // ensurePilotRuntime({ requireProxy }) takes the same path.
+  const viaEnsure = legacy('via-ensure', 'v1.13.9');
+  const ensured = await release.install(viaEnsure, { requireProxy: true });
+  assert.equal(ensured.ok, true, ensured.error);
+  assert.equal(daemonOf(viaEnsure), PROXY_DAEMON);
 
-  // Already on the newest published release: nothing newer to download.
+  // Already on the newest published release, or ahead of it (a beta, or a
+  // runtime pilot-updater moved past the manifest): never a downgrade, and
+  // nothing but the manifest is fetched.
+  for (const [name, tag] of [['current', release.tag], ['ahead', 'v10.0.0-rc.1'], ['ahead-rc-of-same', `${release.tag}-rc.1`]]) {
+    release.served.length = 0;
+    const home = legacy(name, tag);
+    const kept = await release.upgrade(home);
+    assert.equal(kept.ok, true, kept.error);
+    if (name === 'ahead-rc-of-same') {
+      // v9.9.9 is newer than v9.9.9-rc.1, so that one does upgrade.
+      assert.equal(kept.result.upgraded, true);
+      continue;
+    }
+    assert.equal(kept.result.upgraded, false, name);
+    assert.match(kept.result.reason, /is not newer than the installed/);
+    assert.deepEqual(release.served, ['pilotprotocol.network/.well-known/latest.json'], name);
+    assert.equal(daemonOf(home), LEGACY_DAEMON, name);
+    assert.equal(versionOf(home), tag, name);
+  }
+
+  // Unknown or missing versions and managed nodes are never touched, and no
+  // request is made for them.
+  const managedControl = (home) => {
+    mkdirSync(join(home, '.pilot', 'managed'), { recursive: true });
+    writeFileSync(join(home, '.pilot', 'managed', 'enterprise-control.json'), '{}', { mode: 0o600 });
+  };
+  const managedConfig = (home) => writeFileSync(join(home, '.pilot', 'config.json'), JSON.stringify({ enterprise_control: '/secure/control.json' }));
+  for (const [name, tag, extra, reason] of [
+    ['untagged', null, undefined, /has no recorded version/],
+    ['dev', 'dev', undefined, /dev is not a release version/],
+    ['managed-tag', 'managed-runtime-v0.1.5', undefined, /managed \(runtime managed-runtime-v0\.1\.5\)/],
+    ['managed-control', 'v1.13.9', managedControl, /managed \(enterprise control attachment\)/],
+    ['managed-config', 'v1.13.9', managedConfig, /managed \(config\.json enterprise_control\)/],
+  ]) {
+    release.served.length = 0;
+    const home = legacy(name, tag, extra);
+    const kept = await release.upgrade(home);
+    assert.equal(kept.ok, true, kept.error);
+    assert.equal(kept.result.upgraded, false, name);
+    assert.match(kept.result.reason, reason, name);
+    assert.deepEqual(release.served, [], name);
+    assert.equal(daemonOf(home), LEGACY_DAEMON, name);
+    const viaEnsureKept = await release.install(home, { requireProxy: true });
+    assert.equal(viaEnsureKept.ok, true, viaEnsureKept.error);
+    assert.equal(daemonOf(home), LEGACY_DAEMON, name);
+  }
   release.served.length = 0;
-  const current = legacy('current', release.tag);
-  const kept = await release.install(current, { requireProxy: true });
-  assert.equal(kept.ok, true, kept.error);
-  assert.deepEqual(release.served, ['pilotprotocol.network/.well-known/latest.json']);
-  assert.match(readFileSync(join(current, '.pilot', 'bin', 'pilot-daemon'), 'utf8'), /-transport/);
+  const managedByEnv = legacy('managed-env', 'v1.13.9');
+  const envKept = await release.upgrade(managedByEnv, { env: { PILOT_ENTERPRISE_CONTROL: '/secure/control.json' } });
+  assert.equal(envKept.result.upgraded, false);
+  assert.match(envKept.result.reason, /managed \(PILOT_ENTERPRISE_CONTROL\)/);
+  assert.deepEqual(release.served, []);
+
+  // A newer release whose daemon still lacks -proxy is checked in the
+  // staging directory and discarded: the installed runtime stays in place.
+  release.setDaemon(LEGACY_DAEMON);
+  const stillLegacy = legacy('still-legacy', 'v1.13.9');
+  const discarded = await release.upgrade(stillLegacy);
+  assert.equal(discarded.ok, true, discarded.error);
+  assert.equal(discarded.result.upgraded, false);
+  assert.match(discarded.result.reason, /v9\.9\.9 does not support -proxy yet/);
+  assert.equal(versionOf(stillLegacy), 'v1.13.9');
+  assert.deepEqual(stagesOf(stillLegacy), []);
 });
 
 async function refuseDirect(url) {
@@ -310,7 +454,7 @@ async function startReleaseMirror(t) {
   if (!pki) return null;
   const work = mkdtempSync(join(tmpdir(), 'pilot-proxy-runtime-'));
   t.after(() => rmSync(work, { recursive: true, force: true }));
-  const archive = buildRuntimeArchive(work);
+  let archive = buildRuntimeArchive(work, PROXY_DAEMON);
   const tag = 'v9.9.9';
   const assetPath = `/pilot-protocol/pilotprotocol/releases/download/${tag}/pilot-${key}.tar.gz`;
   let digest = createHash('sha256').update(archive).digest('hex');
@@ -345,19 +489,27 @@ async function startReleaseMirror(t) {
     tag,
     assetPath,
     setDigest: (value) => { digest = value; },
+    setDaemon: (script) => {
+      archive = buildRuntimeArchive(work, script);
+      digest = createHash('sha256').update(archive).digest('hex');
+    },
     home: (name) => {
       const home = join(work, name);
       mkdirSync(home);
       return home;
     },
-    install: (home, { proxyURL = proxy.url, requireProxy = false } = {}) => runRuntimeInstall({
+    install: (home, { proxyURL = proxy.url, requireProxy = false } = {}) => runRuntimeInstall(childEnv(home, proxyURL), 'ensurePilotRuntime', { requireProxy }),
+    upgrade: (home, { env = {} } = {}) => runRuntimeInstall({ ...childEnv(home, proxy.url), ...env }, 'upgradeRuntimeForProxy', {}),
+  };
+  function childEnv(home, proxyURL) {
+    return {
       HOME: home,
       PATH: '/usr/bin:/bin',
       HTTPS_PROXY: proxyURL,
       NODE_EXTRA_CA_CERTS: join(work, 'ca.pem'),
       PILOT_RELEASE_MANIFEST_URL: 'https://pilotprotocol.network/.well-known/latest.json',
-    }, { requireProxy }),
-  };
+    };
+  }
 }
 
 function runtimeKey() {
@@ -366,11 +518,12 @@ function runtimeKey() {
   return ['darwin-amd64', 'darwin-arm64', 'linux-amd64', 'linux-arm64'].includes(key) ? key : null;
 }
 
-function buildRuntimeArchive(work) {
+function buildRuntimeArchive(work, daemonScript) {
   const stage = join(work, 'stage');
+  rmSync(stage, { recursive: true, force: true });
   mkdirSync(stage);
-  for (const name of ['daemon', 'pilotctl']) {
-    writeFileSync(join(stage, name), `#!/bin/sh\necho ${name}\n`);
+  for (const [name, script] of [['daemon', daemonScript], ['pilotctl', '#!/bin/sh\necho pilotctl\n']]) {
+    writeFileSync(join(stage, name), script);
     chmodSync(join(stage, name), 0o755);
   }
   const archivePath = join(work, 'runtime.tar.gz');
@@ -384,12 +537,13 @@ function buildRuntimeArchive(work) {
 // The runtime installer resolves pilotctl from $HOME and $PATH, so it runs in
 // a child with an isolated environment: nothing from the host leaks in and no
 // request can bypass the proxy.
-function runRuntimeInstall(env, options = {}) {
+function runRuntimeInstall(env, entry, options = {}) {
   const runtime = new URL('../src/setup/runtime.js', import.meta.url).href;
   const script = `
-    const { ensurePilotRuntime } = await import(${JSON.stringify(runtime)});
+    const runtime = await import(${JSON.stringify(runtime)});
     try {
-      console.log(JSON.stringify({ ok: true, path: await ensurePilotRuntime(${JSON.stringify(options)}) }));
+      const result = await runtime[${JSON.stringify(entry)}](${JSON.stringify(options)});
+      console.log(JSON.stringify(typeof result === 'string' ? { ok: true, path: result } : { ok: true, result }));
     } catch (error) {
       console.log(JSON.stringify({ ok: false, error: error.message }));
     }`;

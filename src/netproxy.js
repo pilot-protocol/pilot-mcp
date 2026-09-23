@@ -9,16 +9,28 @@
 // real server, so certificate verification is exactly what a direct request
 // would do.
 //
-// Resolution mirrors the Go daemon's -proxy flag (common/netproxy) so both
+// Resolution follows the Go daemon's -proxy flag (common/netproxy), so both
 // halves of the install read the same environment the same way:
-//   PILOT_PROXY unset or "auto" → HTTPS_PROXY/https_proxy (HTTP_PROXY/http_proxy
-//                                 for http: targets), falling back to
-//                                 ALL_PROXY/all_proxy, honouring NO_PROXY/no_proxy
-//   PILOT_PROXY=off             → never proxy
-//   PILOT_PROXY=http(s)://...   → that proxy for every request
+//   PILOT_PROXY unset or "auto" → the first non-empty of HTTPS_PROXY,
+//                                 https_proxy, ALL_PROXY, all_proxy; plain
+//                                 http: targets prefer HTTP_PROXY/http_proxy.
+//                                 The first non-empty of NO_PROXY/no_proxy
+//                                 exempts targets.
+//   PILOT_PROXY=off|none|false|direct → never proxy
+//   PILOT_PROXY=[http(s)://]host:port → that proxy for every target (NO_PROXY
+//                                 does not apply; a missing scheme means http)
+// localhost and loopback addresses are never proxied, whatever the mode.
 //
-// No proxy configured means the request goes to globalThis.fetch unchanged.
-// Proxy credentials never appear in errors or logs; use redactProxyURL().
+// Resolution never throws. A value that is not a usable http(s) proxy URL is
+// ignored with a warning (inspectProxy reports it): a malformed setting can
+// cost the proxy, but never a direct install on a host that does not need
+// one. An ignored PILOT_PROXY falls back to "auto"; an ignored HTTPS_PROXY
+// does not fall through to ALL_PROXY, because Go takes the first non-empty
+// variable and the daemon must agree with setup about which one applies.
+//
+// No proxy selected means the request goes to globalThis.fetch unchanged.
+// Proxy credentials never appear in errors, warnings or logs; use
+// redactProxyURL().
 
 import { Buffer } from 'node:buffer';
 import http from 'node:http';
@@ -32,25 +44,83 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
 const MAX_REDIRECTS = 20;
 
-// configuredProxy reports the proxy the environment selects for HTTPS
-// traffic, ignoring NO_PROXY: `{ url, source }` or null. Setup uses it to
-// decide whether the daemon must run behind the proxy.
-export function configuredProxy(env = process.env) {
-  const mode = proxyMode(env);
-  if (mode === 'off') return null;
-  if (mode instanceof URL) return { url: mode, source: 'PILOT_PROXY' };
-  return environmentProxy('https:', env);
+// Setting values (PILOT_PROXY, the daemon's config.json "proxy") that turn
+// proxying off.
+export const PROXY_OFF_VALUES = Object.freeze(['off', 'none', 'false', 'direct']);
+
+const SECURE_PROXY_VARS = ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'];
+
+// inspectProxy resolves the proxy settings once and never throws:
+//   mode      'auto' | 'off' | 'explicit'
+//   proxy     { url, source } used for https: targets (and the daemon's
+//             registry/beacon traffic), or null
+//   plain     { url, source } override for http: targets (auto mode), or null
+//   noProxy   the parsed NO_PROXY/no_proxy list (auto mode)
+//   warnings  log-safe notes about values that were ignored
+// `spec` (named `specSource`) takes the place of PILOT_PROXY when it is
+// non-empty; setup passes the daemon's config.json "proxy" key this way,
+// because the daemon applies that key ahead of $PILOT_PROXY.
+export function inspectProxy(env = process.env, { spec, specSource = 'PILOT_PROXY' } = {}) {
+  const warnings = [];
+  let setting = String(spec ?? '').trim();
+  let settingSource = specSource;
+  if (!setting) {
+    setting = String(env.PILOT_PROXY ?? '').trim();
+    settingSource = 'PILOT_PROXY';
+  }
+  const word = setting.toLowerCase();
+  if (PROXY_OFF_VALUES.includes(word)) {
+    return { mode: 'off', proxy: null, plain: null, noProxy: EMPTY_NO_PROXY, warnings };
+  }
+  if (setting && word !== 'auto') {
+    const parsed = parseProxyURL(setting);
+    if (parsed.url) {
+      return { mode: 'explicit', proxy: { url: parsed.url, source: settingSource }, plain: null, noProxy: EMPTY_NO_PROXY, warnings };
+    }
+    warnings.push(`${settingSource} is not a usable proxy (${parsed.error}); setup ignores it and uses the proxy environment (auto)`);
+  }
+
+  let proxy = null;
+  const [secureRaw, secureVar] = firstEnv(env, SECURE_PROXY_VARS);
+  if (secureRaw) {
+    const parsed = parseProxyURL(secureRaw);
+    if (parsed.url) proxy = { url: parsed.url, source: secureVar };
+    else warnings.push(`${secureVar} is not a usable proxy (${parsed.error}); not using a proxy for HTTPS`);
+  }
+  let plain = null;
+  // Like net/http, HTTP_PROXY is ignored under CGI (REQUEST_METHOD set) so a
+  // request header cannot inject a proxy.
+  const plainVars = String(env.REQUEST_METHOD ?? '') ? ['http_proxy'] : ['HTTP_PROXY', 'http_proxy'];
+  const [plainRaw, plainVar] = firstEnv(env, plainVars);
+  if (plainRaw) {
+    const parsed = parseProxyURL(plainRaw);
+    if (parsed.url) plain = { url: parsed.url, source: plainVar };
+    else warnings.push(`${plainVar} is not a usable proxy (${parsed.error}); http:// requests use ${proxy ? proxy.source : 'no proxy'}`);
+  }
+  const [noProxyRaw] = firstEnv(env, ['NO_PROXY', 'no_proxy']);
+  return { mode: 'auto', proxy, plain, noProxy: parseNoProxy(noProxyRaw), warnings };
+}
+
+// configuredProxy reports the proxy selected for HTTPS traffic, ignoring
+// NO_PROXY: `{ url, source }` or null. Setup uses it to decide whether the
+// daemon must run behind the proxy. Options are those of inspectProxy.
+export function configuredProxy(env = process.env, options = {}) {
+  return inspectProxy(env, options).proxy;
 }
 
 // resolveProxy returns the proxy URL a request to `target` must use, or null
 // for a direct connection.
 export function resolveProxy(target, env = process.env) {
   const url = target instanceof URL ? target : new URL(String(target));
-  const mode = proxyMode(env);
-  if (mode === 'off') return null;
-  if (mode instanceof URL) return mode;
-  if (bypassesProxy(url, env)) return null;
-  return environmentProxy(url.protocol, env)?.url ?? null;
+  const settings = inspectProxy(env);
+  if (settings.mode === 'off') return null;
+  const host = normalizeHost(url.hostname);
+  if (isLoopbackHost(host)) return null;
+  if (settings.mode === 'explicit') return settings.proxy.url;
+  const selected = url.protocol === 'http:' ? (settings.plain ?? settings.proxy) : settings.proxy;
+  if (!selected) return null;
+  const port = url.port || (url.protocol === 'http:' ? '80' : '443');
+  return useProxy(settings.noProxy, host, port) ? selected.url : null;
 }
 
 // redactProxyURL renders a proxy URL safe for logs: scheme, host and port,
@@ -99,112 +169,139 @@ export function createProxyAwareFetch({ env = process.env, tls: tlsOptions = {},
 
 export const proxyAwareFetch = createProxyAwareFetch();
 
-function proxyMode(env) {
-  const raw = String(env.PILOT_PROXY ?? '').trim();
-  if (!raw || raw.toLowerCase() === 'auto') return 'auto';
-  if (raw.toLowerCase() === 'off') return 'off';
-  const url = parseProxyURL(raw, { requireScheme: true });
-  if (!url) throw new Error('PILOT_PROXY must be "auto", "off", or an http:// or https:// proxy URL');
-  return url;
-}
-
-function environmentProxy(protocol, env) {
-  const names = protocol === 'http:'
-    ? ['HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']
-    : ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'];
+function firstEnv(env, names) {
   for (const name of names) {
-    const raw = String(env[name] ?? '').trim();
-    if (!raw) continue;
-    // An unusable value (for example a socks5:// ALL_PROXY meant for other
-    // tools) is skipped rather than fatal: before proxy support every request
-    // went direct, and that must keep working where it already did.
-    const url = parseProxyURL(raw, { requireScheme: false });
-    if (url) return { url, source: name };
+    const value = String(env[name] ?? '').trim();
+    if (value) return [value, name];
   }
-  return null;
+  return ['', ''];
 }
 
-function parseProxyURL(raw, { requireScheme }) {
-  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
-  if (!hasScheme && requireScheme) return null;
+// parseProxyURL mirrors common/netproxy: "host:port" without a scheme is an
+// http proxy; only http and https proxies are supported. The returned error
+// never contains the value, which may carry credentials.
+function parseProxyURL(raw) {
+  const value = raw.includes('://') ? raw : `http://${raw}`;
   let url;
   try {
-    url = new URL(hasScheme ? raw : `http://${raw}`);
+    url = new URL(value);
   } catch {
-    return null;
+    return { error: raw.includes('@') ? 'malformed URL; value withheld because it contains credentials' : 'malformed URL' };
   }
-  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !url.hostname) return null;
-  return url;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { error: `unsupported scheme "${url.protocol.replace(/:$/, '')}", want http or https` };
+  }
+  // An unescaped '/', '?' or '#' in the credentials ends the authority early:
+  // part of the secret would become the proxy host and leak into DNS and
+  // logs. A proxy URL never legitimately has '@' outside its userinfo.
+  if (value.includes('@') && !url.username && !url.password) {
+    return { error: 'credentials must be percent-encoded; value withheld' };
+  }
+  if (!url.hostname) return { error: 'no proxy host' };
+  return { url };
 }
 
-// bypassesProxy applies NO_PROXY with the same rules as Go's httpproxy:
-// "*" matches everything; "example.com" matches the host and its subdomains;
-// ".example.com" (or "*.example.com") only subdomains; an optional ":port"
-// must match; IPs and CIDR ranges match IP-literal targets. Loopback targets
-// are never proxied.
-function bypassesProxy(url, env) {
-  const host = normalizeHost(url.hostname);
-  if (host === 'localhost' || isLoopback(host)) return true;
-  const raw = String(env.NO_PROXY ?? env.no_proxy ?? '').trim();
-  if (!raw) return false;
-  const port = url.port || (url.protocol === 'http:' ? '80' : '443');
-  for (const item of raw.split(',')) {
-    const entry = item.trim().toLowerCase();
+// NO_PROXY, with the common/netproxy (Go httpproxy) rules: comma- or
+// space-separated entries; "*" matches everything; "example.com" matches the
+// host and its subdomains; ".example.com" or "*.example.com" only
+// subdomains; IP addresses and CIDR ranges match IP-literal targets; an
+// optional ":port" must match.
+const EMPTY_NO_PROXY = Object.freeze({ all: false, cidrs: [], ips: [], domains: [] });
+
+function parseNoProxy(raw) {
+  const parsed = { all: false, cidrs: [], ips: [], domains: [] };
+  for (const field of String(raw ?? '').split(/[,\s]+/)) {
+    const entry = field.toLowerCase();
     if (!entry) continue;
-    if (entry === '*') return true;
+    if (entry === '*') return { ...EMPTY_NO_PROXY, all: true };
     if (entry.includes('/')) {
-      if (isIP(host) && cidrContains(entry, host)) return true;
+      const cidr = parseCIDR(entry);
+      if (cidr) parsed.cidrs.push(cidr);
       continue;
     }
-    const [entryHost, entryPort] = splitHostPort(entry);
-    if (entryPort && entryPort !== port) continue;
-    if (isIP(entryHost)) {
-      if (entryHost === host) return true;
+    const split = splitHostPort(entry);
+    let host = entry;
+    let port = '';
+    if (split) {
+      [host, port] = split;
+      if (!host) continue;
+    }
+    host = host.replace(/^\[/, '').replace(/\]$/, '');
+    if (isIP(host)) {
+      parsed.ips.push({ list: addressList(host), port });
       continue;
     }
-    let suffix = entryHost.startsWith('*.') ? entryHost.slice(1) : entryHost;
-    suffix = suffix.replace(/\.$/, '');
-    if (suffix.startsWith('.')) {
-      if (host.endsWith(suffix)) return true;
-    } else if (host === suffix || host.endsWith(`.${suffix}`)) {
-      return true;
-    }
+    if (!host) continue;
+    if (host.startsWith('*')) host = host.slice(1);
+    const matchHost = !host.startsWith('.');
+    if (matchHost) host = `.${host}`;
+    if (host === '.') continue;
+    parsed.domains.push({ suffix: host, port, matchHost });
   }
-  return false;
+  return parsed;
+}
+
+// useProxy reports whether host:port goes through the proxy under noProxy.
+function useProxy(noProxy, host, port) {
+  if (!host) return true;
+  if (isLoopbackHost(host)) return false;
+  if (noProxy.all) return false;
+  const family = isIP(host);
+  if (family) {
+    const type = family === 6 ? 'ipv6' : 'ipv4';
+    if (noProxy.ips.some((entry) => (!entry.port || entry.port === port) && entry.list.check(host, type))) return false;
+    if (noProxy.cidrs.some((list) => list.check(host, type))) return false;
+    return true;
+  }
+  for (const entry of noProxy.domains) {
+    if ((host.endsWith(entry.suffix) || (entry.matchHost && host === entry.suffix.slice(1)))
+      && (!entry.port || entry.port === port)) return false;
+  }
+  return true;
+}
+
+// splitHostPort follows Go's net.SplitHostPort: null when the entry has no
+// port (or too many colons, as a bare IPv6 address does).
+function splitHostPort(entry) {
+  if (entry.startsWith('[')) {
+    const end = entry.indexOf(']');
+    if (end < 0 || entry[end + 1] !== ':' || entry.slice(end + 2).includes(':')) return null;
+    return [entry.slice(1, end), entry.slice(end + 2)];
+  }
+  const colon = entry.lastIndexOf(':');
+  if (colon < 0 || entry.indexOf(':') !== colon) return null;
+  return [entry.slice(0, colon), entry.slice(colon + 1)];
+}
+
+function parseCIDR(entry) {
+  const [address, prefix, extra] = entry.split('/');
+  const family = isIP(address);
+  if (!family || extra !== undefined || !/^\d+$/.test(prefix ?? '')) return null;
+  const bits = Number(prefix);
+  if (bits > (family === 6 ? 128 : 32)) return null;
+  const list = new BlockList();
+  list.addSubnet(address, bits, family === 6 ? 'ipv6' : 'ipv4');
+  return list;
+}
+
+function addressList(address) {
+  const list = new BlockList();
+  list.addAddress(address, isIP(address) === 6 ? 'ipv6' : 'ipv4');
+  return list;
+}
+
+const LOOPBACK = new BlockList();
+LOOPBACK.addSubnet('127.0.0.0', 8, 'ipv4');
+LOOPBACK.addAddress('::1', 'ipv6');
+
+function isLoopbackHost(host) {
+  if (host === 'localhost') return true;
+  const family = isIP(host);
+  return family !== 0 && LOOPBACK.check(host, family === 6 ? 'ipv6' : 'ipv4');
 }
 
 function normalizeHost(hostname) {
-  return hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
-}
-
-function isLoopback(host) {
-  if (isIP(host) === 4) return host.startsWith('127.');
-  if (isIP(host) === 6) return host === '::1' || host === '0:0:0:0:0:0:0:1';
-  return false;
-}
-
-function splitHostPort(entry) {
-  const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(entry);
-  if (bracketed) return [bracketed[1], bracketed[2] ?? ''];
-  const colons = entry.split(':').length - 1;
-  if (colons === 1) {
-    const [host, port] = entry.split(':');
-    return [host, /^\d+$/.test(port) ? port : ''];
-  }
-  return [entry, ''];
-}
-
-function cidrContains(cidr, host) {
-  const [address, prefix] = cidr.split('/');
-  const family = isIP(address);
-  if (!family || family !== isIP(host) || !/^\d+$/.test(prefix)) return false;
-  try {
-    const list = new BlockList();
-    list.addSubnet(address, Number(prefix), family === 6 ? 'ipv6' : 'ipv4');
-    return list.check(host, family === 6 ? 'ipv6' : 'ipv4');
-  } catch {
-    return false;
-  }
+  return hostname.replace(/^\[|\]$/g, '').toLowerCase();
 }
 
 function defaultPort(url) {

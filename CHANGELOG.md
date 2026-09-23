@@ -7,25 +7,44 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 ## [Unreleased]
 
 ### Fixed
-- `setup` now works from proxy-only agent sandboxes such as Meta Muse. The
-  runtime manifest and archive downloads honour `HTTPS_PROXY`/`https_proxy`,
-  `ALL_PROXY`/`all_proxy` and `NO_PROXY` (Node's built-in fetch ignores them),
+- `setup` now works from proxy-only agent sandboxes such as Meta Muse, as a
+  normal user or as root and without systemd. The runtime manifest and archive
+  downloads honour the proxy environment (Node's built-in fetch ignores it),
   tunnelling with `CONNECT` by hostname so poisoned local DNS is never
   consulted; TLS stays end-to-end and the archive SHA-256 check is unchanged.
-  Proxy credentials are redacted from every message. Hosts that set
-  `HTTPS_PROXY` but relied on direct downloads can set `PILOT_PROXY=off`.
-- The UDP transport probe sends the beacon's real discover message. The old
-  payload was never answered, so every network was reported as UDP-blocked.
+  Proxy selection matches `pilot-daemon -proxy` (common/netproxy): the first
+  non-empty of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy`;
+  `HTTP_PROXY`/`http_proxy` first for plain `http://`; the first non-empty of
+  `NO_PROXY`/`no_proxy`; localhost and loopback never proxied. Proxy
+  credentials are redacted from every message, and credentials that are not
+  percent-encoded are rejected rather than mistaken for the proxy host. Hosts
+  that set `HTTPS_PROXY` but relied on direct downloads can set
+  `PILOT_PROXY=off`.
+- The UDP transport probe sends the beacon's real discover message, three
+  times across its window. The old payload was never answered, so every
+  network was reported as UDP-blocked.
 
 ### Added
 - With a proxy configured and UDP blocked, `setup` starts a `pilot-daemon` that
-  supports `-proxy` with `-transport=compat -proxy=auto`, forwards the proxy
-  environment, and records `"transport": "compat"` in `~/.pilot/config.json`.
-  An older per-user runtime is upgraded to the latest release first; otherwise
-  the start is unchanged and setup points at the pilot-sandbox skill.
-- `doctor` reports the egress proxy (redacted) and whether the daemon supports
-  `-proxy`. `PILOT_PROXY=auto|off|URL` and `PILOT_TRANSPORT=udp|compat` are
-  honoured by setup.
+  supports `-proxy` with `-transport=compat` and forwards the proxy
+  environment; the daemon's `-proxy=auto` default does the rest, so a
+  `"proxy"` in `~/.pilot/config.json` or `PILOT_PROXY` is never overridden.
+  Setup records `"transport": "compat"` in `~/.pilot/config.json` with
+  `"transport_set_by": "pilot-mcp"` and removes it on a later run that finds
+  UDP working or no proxy; a transport the user set is never changed.
+- An older per-user runtime is upgraded only to a strictly newer stable
+  release whose daemon is verified, before the swap, to support `-proxy`.
+  Managed nodes (managed runtime tag, control attachment, `enterprise_control`
+  in config.json, or `PILOT_ENTERPRISE_CONTROL`) keep their pinned runtime,
+  and a runtime of unknown version is left alone. Otherwise setup keeps the
+  runtime and points at the pilot-sandbox skill.
+- `PILOT_PROXY=auto|off|none|false|direct|[http(s)://]host:port` and
+  `PILOT_TRANSPORT=udp|compat` are honoured by setup. An unusable proxy value
+  is ignored with a warning and never stops setup or a UDP host's daemon
+  start.
+- `doctor` reports the proxy the daemon would use (redacted), whether the
+  daemon supports `-proxy`, ignored proxy settings (`network.warnings`) and
+  the transport recorded in config.json (`network.transport`).
 
 ## [0.2.13] - 2026-08-07
 
