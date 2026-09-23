@@ -251,13 +251,37 @@ export function supportsManagedAdoption(binary) {
 // The probe runs with only PATH and HOME, so no proxy credential from the
 // environment can end up in a printed flag default.
 export function supportsEgressProxy(daemon) {
-  if (!daemon || !existsSync(daemon)) return false;
+  return daemonFeatures(daemon).proxy;
+}
+
+// daemonFeatures reads a pilot-daemon's -h once and reports:
+//   known          it printed a flag list, so the other two can be trusted
+//   proxy          it understands -proxy
+//   autoTransport  its -transport accepts 'auto', which its usage names; the
+//                  same check install.sh and pilotctl make. Such a runtime
+//                  picks udp or compat itself on every start, reads
+//                  "transport" in any case, and install.sh saves
+//                  "transport": "auto" for it.
+export function daemonFeatures(daemon) {
+  const none = { known: false, proxy: false, autoTransport: false };
+  if (!daemon || !existsSync(daemon)) return none;
   const env = {};
   for (const name of ['PATH', 'HOME']) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
   const probe = spawnSync(daemon, ['-h'], { encoding: 'utf8', timeout: 5_000, env });
-  return /^\s*-proxy\b(?!-)/m.test(`${probe.stdout ?? ''}\n${probe.stderr ?? ''}`);
+  const lines = `${probe.stdout ?? ''}\n${probe.stderr ?? ''}`.split('\n');
+  const start = lines.findIndex((line) => /^\s+-transport(?:\s|$)/.test(line));
+  let transportUsage = '';
+  if (start >= 0) {
+    const end = lines.findIndex((line, index) => index > start && /^\s*-[a-z]/.test(line));
+    transportUsage = lines.slice(start, end < 0 ? undefined : end).join('\n');
+  }
+  return {
+    known: lines.some((line) => /^\s+-[a-z][\w-]*(?:\s|$)/.test(line)),
+    proxy: lines.some((line) => /^\s*-proxy\b(?!-)/.test(line)),
+    autoTransport: transportUsage.includes("'auto'"),
+  };
 }
 
 export function installedRuntimeTag(home = homedir()) {

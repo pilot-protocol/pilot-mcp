@@ -167,15 +167,25 @@ there, as a normal user or as root, and needs no systemd or launchd:
   the daemon, which would refuse to start with it. A `"proxy"` key in
   `~/.pilot/config.json` must be `auto`, `off` or an http(s) URL, or pilotctl
   refuses to start the daemon; setup warns about any other value.
+- A `pilot-daemon` whose `-transport` accepts `auto` (`install.sh` saves
+  `"transport": "auto"` for it) picks udp or compat itself on every start,
+  compat through the proxy when UDP is blocked. Setup leaves that choice to
+  it: no `-transport`, nothing recorded in `~/.pilot/config.json`, and a
+  `"transport": "compat"` an earlier setup recorded is removed.
 - When UDP to the beacon is blocked (three probes, no answer) and the installed
-  `pilot-daemon` supports `-proxy`, setup starts it with `-transport=compat`.
-  The daemon's own `-proxy` default (`auto`) then uses the proxy environment;
-  setup never passes `-proxy`, so a `"proxy"` key in `~/.pilot/config.json` or
-  `PILOT_PROXY` still wins. Setup records `"transport": "compat"` in
-  `~/.pilot/config.json`, marked `"transport_set_by": "pilot-mcp"`, so a plain
-  `pilotctl daemon start` after a restart comes back the same way; a later
-  setup that finds UDP working, or no proxy, removes it again. A `"transport"`
-  you (or `install.sh`) set is never changed.
+  `pilot-daemon` supports `-proxy` but not `-transport=auto`, setup starts it
+  with `-transport=compat`. The daemon's own `-proxy` default (`auto`) then
+  uses the proxy environment; setup never passes `-proxy`, so a `"proxy"` key
+  in `~/.pilot/config.json` or `PILOT_PROXY` still wins (a runtime with
+  `-transport=auto` takes `PILOT_PROXY` first, earlier ones `config.json`).
+  Setup records `"transport": "compat"` in `~/.pilot/config.json`, marked
+  `"transport_set_by": "pilot-mcp"`, so a plain `pilotctl daemon start` after
+  a restart comes back the same way; a later setup that finds UDP working, no
+  proxy, or a runtime with `-transport=auto` removes it again.
+- A `"transport"` you (or `install.sh`) set is never changed: `udp`, `compat`,
+  `auto`, or a value setup warns about. `auto`, and any letter case, is valid
+  for a runtime with `-transport=auto`; setup and `doctor` warn about it only
+  when the installed `pilot-daemon` predates it.
 - An older per-user runtime (`~/.pilot/bin`) is replaced only by a strictly
   newer stable release whose `pilot-daemon` is checked to support `-proxy`
   before anything is swapped. A managed node's pinned runtime, a runtime of
@@ -187,8 +197,9 @@ there, as a normal user or as root, and needs no systemd or launchd:
   switch the installed runtime to compat mode: `pilotctl config --set
   transport=compat`, plus, for a runtime older than `-proxy`,
   `pilotctl config --set registry=registry.pilotprotocol.network:443`.
-- `PILOT_TRANSPORT=udp|compat` skips the UDP probe. Only a runtime whose
-  `pilot-daemon` lists `-proxy` applies it (its pilotctl passes it on);
+- `PILOT_TRANSPORT=udp|compat` skips the UDP probe; `PILOT_TRANSPORT=auto`
+  is passed on as `auto`. Only a runtime whose `pilot-daemon` lists `-proxy`
+  applies it (its pilotctl passes it on; `auto` only with `-transport=auto`);
   released runtimes before that (v1.13.9) ignore it, and setup says so and
   reports the transport the daemon really runs.
 - `npx -y pilotprotocol-mcp doctor` shows the proxy the daemon would use

@@ -4,11 +4,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { daemonBinaryPath, daemonHealthy, pilotctlBinaryPath } from './daemon-bridge.js';
-import { inspectProxy, redactProxyURL } from './netproxy.js';
-import { configProxySpec, daemonSettingsEnv, daemonSettingWarnings, PILOT_SANDBOX_SKILL_URL } from './setup/daemon.js';
+import { redactProxyURL } from './netproxy.js';
+import { daemonProxyView, daemonSettingWarnings, PILOT_SANDBOX_SKILL_URL } from './setup/daemon.js';
 import { detectHarnesses } from './setup/detect.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport } from './setup/pilot-config.js';
-import { supportsEgressProxy } from './setup/runtime.js';
+import { daemonFeatures } from './setup/runtime.js';
 import { VERSION } from './version.js';
 
 export async function runDoctor(flags = {}, options = {}) {
@@ -55,24 +55,32 @@ function runtimeCheck() {
 
 // networkCheck reports the egress proxy the daemon would use (redacted) and
 // the mode behind it, whether the daemon pilotctl would launch supports it,
-// any proxy or transport setting that is ignored or refused, and the
+// any proxy or transport setting that is ignored or refused (judged against
+// that daemon: "auto" is valid for one with -transport=auto), and the
 // transport recorded in ~/.pilot/config.json.
 function networkCheck(env, home) {
   const { path, config } = readPilotConfig(home);
-  const warnings = daemonSettingWarnings(env, config ?? {}, path);
-  const view = inspectProxy({ ...env, ...daemonSettingsEnv(env) }, { spec: configProxySpec(config ?? {}), specSource: 'config.json proxy' });
+  let features;
+  const runtime = () => {
+    if (!features) {
+      let daemon = null;
+      try {
+        daemon = daemonBinaryPath(pilotctlBinaryPath(env), env);
+      } catch {
+        // No runtime: reported by runtimeCheck.
+      }
+      features = daemonFeatures(daemon);
+    }
+    return features;
+  };
+  const warnings = daemonSettingWarnings(env, config ?? {}, path, runtime);
+  const view = daemonProxyView(env, config ?? {}, runtime);
   warnings.push(...view.warnings);
   const { proxy } = view;
   const report = { proxy: null, mode: view.mode };
   if (view.setting) report.setting = view.setting;
   if (proxy) {
-    let daemon = null;
-    try {
-      daemon = daemonBinaryPath(pilotctlBinaryPath(env), env);
-    } catch {
-      // No runtime: reported by runtimeCheck.
-    }
-    Object.assign(report, { proxy: redactProxyURL(proxy.url), source: proxy.source, daemon_proxy_support: supportsEgressProxy(daemon) });
+    Object.assign(report, { proxy: redactProxyURL(proxy.url), source: proxy.source, daemon_proxy_support: runtime().proxy });
   }
   if (warnings.length) report.warnings = warnings;
   if (typeof config?.transport === 'string' && config.transport) {

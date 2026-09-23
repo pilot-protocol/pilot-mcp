@@ -35,6 +35,15 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
   Setup records `"transport": "compat"` in `~/.pilot/config.json` with
   `"transport_set_by": "pilot-mcp"` and removes it on a later run that finds
   UDP working or no proxy; a transport the user set is never changed.
+- A runtime whose `pilot-daemon -transport` accepts `auto` (the one
+  `install.sh` saves `"transport": "auto"` for) is left to pick udp or compat
+  itself: setup passes no `-transport`, records nothing, and removes a
+  `"compat"` an earlier setup recorded. `"transport": "auto"` in config.json
+  and `PILOT_TRANSPORT=auto` (any case) are valid for such a runtime, kept and
+  passed on unchanged; setup and `doctor` warn only when the installed daemon
+  predates `auto`. A config.json `"transport"` without setup's marker is never
+  overwritten, whatever its value. For such a runtime `PILOT_PROXY` beats a
+  config.json `"proxy"`, as in its pilotctl and daemon.
 - An older per-user runtime is upgraded only to a strictly newer stable
   release whose daemon is verified, before the swap, to support `-proxy`.
   Managed nodes (managed runtime tag, control attachment, `enterprise_control`
@@ -49,7 +58,7 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
   and not passed on, so the daemon neither refuses to start nor dials a typo.
   A config.json `"proxy"` that pilotctl would refuse is reported on every
   transport. `PILOT_TRANSPORT` is passed on lower-cased, or not at all when it
-  is not `udp` or `compat`.
+  is not `udp`, `compat` or `auto` (or is `auto` for a runtime that refuses it).
 - `PILOT_TRANSPORT=udp|compat` skips the UDP probe and is applied only by a
   runtime whose daemon has `-proxy`; with an older runtime (v1.13.9, which
   ignores it) setup says so and the summary reports the transport the daemon
