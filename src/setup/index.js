@@ -169,7 +169,7 @@ export async function runSetup(flags) {
   log('');
   log(`  Address:   ${opts.address ?? (opts.network_unreachable ? '(none: not on the network)' : '(fetching…)')}`);
   log(`  Hostname:  ${opts.hostname ?? '(not set)'}`);
-  log(`  Transport: ${opts.transport}`);
+  log(`  Transport: ${opts.daemon_not_started ? '(daemon not started)' : opts.transport}`);
   if (opts.proxy) log(`  Proxy:     ${opts.proxy}${proxyNote(opts)}`);
   if (opts.proxy_refresh) log(`  Proxy credentials: ${PROXY_REFRESH_SUMMARY[opts.proxy_refresh] ?? opts.proxy_refresh}`);
   log(`  Configured: ${configured.join(', ') || '(none)'}`);
