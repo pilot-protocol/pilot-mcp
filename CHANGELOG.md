@@ -7,11 +7,20 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 ## [Unreleased]
 
 ### Fixed
-- `setup` now works from proxy-only agent sandboxes such as Meta Muse, as a
-  normal user or as root and without systemd. The runtime manifest and archive
-  downloads honour the proxy environment (Node's built-in fetch ignores it),
-  tunnelling with `CONNECT` by hostname so poisoned local DNS is never
-  consulted; TLS stays end-to-end and the archive SHA-256 check is unchanged.
+- `setup` runs in proxy-only agent sandboxes such as Meta Muse, as a normal
+  user or as root and without systemd. The node reaches the Pilot network
+  there only with a runtime whose `pilot-daemon` has `-proxy`; v1.13.9 and
+  v1.13.10-rc.1 do not, and it arrives with pilot-protocol/pilotprotocol#470.
+  With an older runtime the summary no longer says that trust usually
+  resolves within 60s. Instead it:
+  - says the node cannot reach the Pilot network and why;
+  - stops the daemon setup started if it never came up;
+  - points at the pilot-sandbox skill;
+  - exits 1.
+
+  The runtime manifest and archive downloads honour the proxy environment
+  (Node's built-in fetch ignores it), tunnelling with `CONNECT` by hostname
+  so poisoned local DNS is never consulted; TLS stays end-to-end and the archive SHA-256 check is unchanged.
   Proxy selection is a port of common/netproxy v0.5.14, which
   `pilot-daemon -proxy` uses (its resolver tests run here as a parity table):
   the first usable one of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`,
@@ -71,12 +80,21 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
   run before every download request and redirect hop, and once more on a 407
   (or an unparseable CONNECT reply) with one retry, the convention of common
   v0.5.15 and `pilot-daemon -proxy-cmd`. A `pilot-daemon` with `-proxy-cmd`
-  gets it (the sandbox default as `PILOT_PROXY_CMD`, also saved as
-  `"proxy_cmd"` in config.json unless one is there); one with `-proxy` but not
+  gets it. The sandbox default goes to it as `PILOT_PROXY_CMD` for that
+  start only and is never saved: the pilotctl with `-proxy-cmd` derives it
+  on every start, and only while the proxy comes from the environment, so an
+  explicit proxy set later is not replaced. A daemon with `-proxy` but not
   `-proxy-cmd` goes through the pilot-sandbox skill's `egress_relay.py` on
-  `127.0.0.1:3128`, started if it is not running; otherwise setup warns that
-  the credentials will go stale. The setup summary reports it
-  (`proxy_refresh`).
+  `127.0.0.1:3128`, which setup starts if it is not running. Otherwise setup
+  warns that the credentials will go stale. The setup summary reports which
+  path was taken (`proxy_refresh`).
+- A configured proxy command's URL replaces an explicit `PILOT_PROXY` or
+  config.json `"proxy"` URL in `pilot-daemon`. Setup and `doctor` report
+  that (`proxy_replaced_by`, `network.proxy_cmd.replaces`) instead of naming
+  the explicit proxy. The `"proxy_cmd"` sandbox default that `install.sh`
+  saves is a special case: setup's downloads use it only with the proxy
+  environment. Setup and `doctor` warn when `pilot-daemon` would use it over
+  an explicit proxy, and give the command to remove it.
 - `doctor` reports the proxy the daemon would use (redacted), or `off` and
   the setting that chose it (`network.mode`, `network.setting`), whether the
   daemon supports `-proxy`, where a proxy command comes from and whether the

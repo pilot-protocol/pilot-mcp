@@ -13,6 +13,11 @@
 //   9. Print summary with pilot address and which harnesses were configured.
 //
 // Replaces the current ~16-step new-user journey with one command.
+//
+// Resolves { ok }. ok is false only when the node cannot reach the Pilot
+// network from this host with the installed runtime (behind an egress proxy
+// with UDP blocked, a pilot-daemon without -proxy): waiting does not fix
+// that, so cli.js exits non-zero and the summary names what does.
 
 import process from 'node:process';
 import { existsSync } from 'node:fs';
@@ -72,6 +77,9 @@ export async function runSetup(flags) {
       opts.proxy = daemon.proxy;
       opts.proxy_supported = daemon.proxy_supported;
       opts.proxy_refresh = daemon.proxy_refresh;
+      opts.proxy_replaced_by = daemon.proxy_replaced_by;
+      opts.network_unreachable = daemon.network_unreachable === true;
+      opts.daemon_stopped = daemon.daemon_stopped === true;
     } catch (error) {
       // Harness attachment remains useful and is safe in unmanaged pass-through
       // mode. Do not abort before writing adapters merely because the separate
@@ -116,7 +124,17 @@ export async function runSetup(flags) {
   // could not prove trust works.
   log('');
   log('============================================');
-  if (opts.trust_verified !== true) {
+  if (opts.network_unreachable) {
+    log('Harness adapters installed — THIS NODE CANNOT REACH THE PILOT NETWORK.');
+    log(`UDP is blocked and the way out is the egress proxy ${opts.proxy}, but the`);
+    log('installed pilot-daemon has no -proxy flag, so it cannot use that proxy, and it');
+    log('could not get out without it. This will not resolve by waiting or re-running doctor.');
+    if (opts.daemon_stopped) log('Setup stopped the pilot-daemon it started.');
+    log('To bring this node online:');
+    log(`  - now: follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`);
+    log('  - or re-run `npx -y pilotprotocol-mcp setup` once a Pilot runtime whose pilot-daemon');
+    log('    has -proxy is released; setup installs it on a node that is not managed.');
+  } else if (opts.trust_verified !== true) {
     if (opts.daemon_error) {
       log('Harness adapters installed — PROTOCOL RUNTIME NOT AVAILABLE.');
       log('Unmanaged agents continue normally; managed control is not active.');
@@ -131,21 +149,36 @@ export async function runSetup(flags) {
     log('Pilot is installed and running. Trust with list-agents verified.');
   }
   log('');
-  log(`  Address:   ${opts.address ?? '(fetching…)'}`);
+  log(`  Address:   ${opts.address ?? (opts.network_unreachable ? '(none: not on the network)' : '(fetching…)')}`);
   log(`  Hostname:  ${opts.hostname}`);
   log(`  Transport: ${opts.transport}`);
-  if (opts.proxy) {
-    log(`  Proxy:     ${opts.proxy}${opts.proxy_supported ? '' : ` (daemon lacks -proxy; see ${PILOT_SANDBOX_SKILL_URL})`}`);
-  }
+  if (opts.proxy) log(`  Proxy:     ${opts.proxy}${proxyNote(opts)}`);
   if (opts.proxy_refresh) log(`  Proxy credentials: ${PROXY_REFRESH_SUMMARY[opts.proxy_refresh] ?? opts.proxy_refresh}`);
   log(`  Configured: ${configured.join(', ') || '(none)'}`);
   if (skipped.length) log(`  Skipped:    ${skipped.join(', ')}`);
   log('');
   log('Next steps:');
-  log('  npx -y pilotprotocol-mcp tour    — try one specialist query');
-  log('  npx -y pilotprotocol-mcp doctor  — diagnose if anything looks wrong');
-  log('  npx -y pilotprotocol-mcp peers   — see who you are connected to');
+  if (opts.network_unreachable) {
+    log(`  pilot-sandbox skill               — ${PILOT_SANDBOX_SKILL_URL}`);
+    log('  npx -y pilotprotocol-mcp doctor  — shows the proxy and whether pilot-daemon can use it');
+  } else {
+    log('  npx -y pilotprotocol-mcp tour    — try one specialist query');
+    log('  npx -y pilotprotocol-mcp doctor  — diagnose if anything looks wrong');
+    log('  npx -y pilotprotocol-mcp peers   — see who you are connected to');
+  }
   log('============================================');
+  return { ok: !opts.network_unreachable };
+}
+
+// proxyNote qualifies the summary's proxy: one the daemon cannot use, or an
+// explicit one a configured proxy command replaces.
+function proxyNote(opts) {
+  if (!opts.proxy_supported) {
+    return opts.trust_verified === true
+      ? ' (not used: pilot-daemon has no -proxy and reached the network directly)'
+      : ` (pilot-daemon has no -proxy; see ${PILOT_SANDBOX_SKILL_URL})`;
+  }
+  return opts.proxy_replaced_by ? ` (replaced by the URL the proxy command in ${opts.proxy_replaced_by} prints)` : '';
 }
 
 const PROXY_REFRESH_SUMMARY = {

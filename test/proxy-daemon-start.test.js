@@ -7,13 +7,13 @@ import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
 import { createSocket } from 'node:dgram';
 import { createServer } from 'node:net';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { daemonBinaryPath } from '../src/daemon-bridge.js';
-import { findExecutable, SANDBOX_PROXY_CMD } from '../src/netproxy.js';
+import { findExecutable, proxyCommandFor, SANDBOX_PROXY_CMD } from '../src/netproxy.js';
 import { installDaemon, PILOT_SANDBOX_SKILL_URL, planDaemonStart } from '../src/setup/daemon.js';
 import { ensureEgressRelay, findEgressRelay } from '../src/setup/proxy-refresh.js';
 import { daemonFeatures, supportsEgressProxy } from '../src/setup/runtime.js';
@@ -117,7 +117,7 @@ test('a daemon without -proxy keeps today\'s start and points at the pilot-sandb
     upgradeRuntime: async () => { upgrades += 1; },
   });
   assert.equal(upgrades, 1);
-  assert.deepEqual(fx.calls()[0].args, ['daemon', 'start']);
+  assert.deepEqual(startCall(fx).args, ['daemon', 'start']);
   assert.equal(JSON.parse(readFileSync(fx.config, 'utf8')).transport, undefined);
   assert.equal(result.proxy, REDACTED);
   assert.equal(result.proxy_supported, false);
@@ -181,7 +181,7 @@ test('a node adopted on an earlier run keeps its pinned runtime without --manage
       log: (line) => lines.push(line),
       upgradeRuntime: () => assert.fail(`managed runtimes are pinned (${name})`),
     });
-    assert.deepEqual(fx.calls()[0].args, ['daemon', 'start'], name);
+    assert.deepEqual(startCall(fx).args, ['daemon', 'start'], name);
     assert.match(lines.join('\n'), evidence, name);
     assert.match(lines.join('\n'), /pinned runtime is kept/, name);
   }
@@ -212,7 +212,98 @@ test('the upgrade outcome is reported, and a kept runtime still gets the pilot-s
   assert.match(output, /Keeping the installed runtime: the latest stable release v1\.13\.9 does not support -proxy yet\./);
   assert.ok(output.includes(PILOT_SANDBOX_SKILL_URL), output);
   assert.equal(result.proxy_supported, false);
-  assert.deepEqual(fx.calls()[0].args, ['daemon', 'start']);
+  assert.deepEqual(startCall(fx).args, ['daemon', 'start']);
+});
+
+test('behind a proxy, a daemon without -proxy that cannot get out is reported unreachable and stopped', { skip }, async (t) => {
+  const kept = () => ({ upgraded: false, reason: 'the latest stable release v1.13.9 is not newer than the installed v1.13.9' });
+  // The Muse case: the daemon dials the registry directly, never comes up
+  // (pilotctl's readiness timeout), and the trust check fails.
+  let fx = fixture(t, LEGACY_USAGE);
+  fx.startFails();
+  let lines = [];
+  let result = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: (line) => lines.push(line), upgradeRuntime: kept,
+  });
+  assert.deepEqual(fx.calls().map((call) => call.args.slice(0, 2).join(' ')), ['daemon status', 'daemon start', 'send-message list-agents', 'daemon stop']);
+  assert.equal(result.trust_verified, false);
+  assert.equal(result.network_unreachable, true);
+  assert.equal(result.daemon_stopped, true);
+  assert.equal(result.proxy_supported, false);
+  assert.equal(fx.alive(), false);
+  assert.ok(result.hint.includes(PILOT_SANDBOX_SKILL_URL), result.hint);
+  assert.doesNotMatch(result.hint, /resolves|retry in 60s/);
+  assert.match(lines.join('\n'), /Stopped the pilot-daemon setup started: it did not come up/);
+  assert.doesNotMatch(lines.join('\n') + result.hint, /s3cr3t|muse-agent/);
+
+  // A daemon that was already running is not setup's to stop.
+  fx = fixture(t, LEGACY_USAGE);
+  fx.markRunning();
+  writeFileSync(join(fx.work, 'daemon-dead'), '');
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: () => {}, upgradeRuntime: kept });
+  assert.equal(result.network_unreachable, true);
+  assert.equal(result.daemon_stopped, undefined);
+  assert.equal(fx.alive(), true);
+  assert.equal(fx.calls().some((call) => call.args[1] === 'stop'), false);
+
+  // One that came up but fails the trust check is unreachable, and kept.
+  fx = fixture(t, LEGACY_USAGE);
+  writeFileSync(join(fx.work, 'daemon-dead'), '');
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: () => {}, upgradeRuntime: kept });
+  assert.equal(result.network_unreachable, true);
+  assert.equal(result.daemon_stopped, undefined);
+  assert.equal(fx.alive(), true);
+
+  // Where the host lets it out directly, it works, and nothing is flagged.
+  fx = fixture(t, LEGACY_USAGE);
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: (line) => lines.push(line), upgradeRuntime: kept });
+  assert.equal(result.trust_verified, true);
+  assert.equal(result.network_unreachable, undefined);
+  assert.equal(fx.alive(), true);
+  assert.doesNotMatch(lines.join('\n'), /Stopped/);
+
+  // A daemon that can use the proxy is never flagged or stopped by this.
+  fx = fixture(t, PROXY_USAGE);
+  fx.startFails();
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: () => {} });
+  assert.equal(result.trust_verified, false);
+  assert.equal(result.network_unreachable, undefined);
+  assert.deepEqual(fx.calls().map((call) => call.args[1] ?? call.args[0]), ['start', 'list-agents']);
+});
+
+test('setup exits non-zero and names the way forward when the node cannot reach the network', { skip, timeout: 60_000 }, async (t) => {
+  const cli = new URL('../cli.js', import.meta.url).pathname;
+  const setup = (fx) => new Promise((resolve) => {
+    execFile(process.execPath, [cli, 'setup'], {
+      env: {
+        HOME: fx.home, PATH: '/usr/bin:/bin', PILOTCTL_BIN: fx.pilotctl, PILOT_SOCKET: join(fx.work, 'pilot.sock'),
+        PILOT_TRANSPORT: 'compat', HTTPS_PROXY: PROXY, PILOT_HOSTNAME: 'muse-agent-1',
+      },
+    }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, output: `${stdout}${stderr}` }));
+  });
+  // A released runtime (no -proxy) that dials directly and never comes up.
+  let fx = fixture(t, LEGACY_USAGE);
+  fx.startFails();
+  let run = await setup(fx);
+  assert.equal(run.code, 1, run.output);
+  assert.match(run.output, /THIS NODE CANNOT REACH THE PILOT NETWORK/);
+  assert.match(run.output, /the egress proxy http:\/\/\*\*\*@proxy\.muse\.internal:3128, but the\ninstalled pilot-daemon has no -proxy flag/);
+  assert.match(run.output, /This will not resolve by waiting or re-running doctor\./);
+  assert.match(run.output, /Setup stopped the pilot-daemon it started\./);
+  assert.ok(run.output.includes(`now: follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`), run.output);
+  assert.doesNotMatch(run.output, /resolves on its own|TRUST NOT YET VERIFIED|try one specialist query/);
+  assert.doesNotMatch(run.output, /s3cr3t|muse-agent@|muse-agent:/);
+  assert.equal(fx.alive(), false);
+
+  // The same runtime on a host that lets it out directly: success, exit 0,
+  // and the summary says the proxy is not used.
+  fx = fixture(t, LEGACY_USAGE);
+  run = await setup(fx);
+  assert.equal(run.code, 0, run.output);
+  assert.match(run.output, /Pilot is installed and running\. Trust with list-agents verified\./);
+  assert.match(run.output, /Proxy: {5}http:\/\/\*\*\*@proxy\.muse\.internal:3128 \(not used: pilot-daemon has no -proxy and reached the network directly\)/);
+  assert.doesNotMatch(run.output, /CANNOT REACH/);
 });
 
 test('without a proxy, with UDP available, or with PILOT_PROXY=off the start is unchanged', { skip }, async (t) => {
@@ -692,7 +783,7 @@ test('a runtime with -transport=auto gets no recorded transport, and loses the o
 const SANDBOX = Object.freeze({ sandbox: true, bash: true });
 const NOT_SANDBOX = Object.freeze({ sandbox: false, bash: true });
 
-test('in a sandbox, a daemon with -proxy-cmd re-reads rotating proxy credentials, and later starts keep it', { skip }, async (t) => {
+test('in a sandbox, a daemon with -proxy-cmd re-reads rotating proxy credentials, and nothing is saved', { skip }, async (t) => {
   const fx = fixture(t, CMD_USAGE);
   const lines = [];
   const result = await installDaemon({
@@ -706,22 +797,85 @@ test('in a sandbox, a daemon with -proxy-cmd re-reads rotating proxy credentials
   // The daemon still gets the launch-time proxy: it serves until the first
   // run of the command, and the command replaces it from then on.
   assert.equal(start.env.HTTPS_PROXY, PROXY);
-  assert.equal(readConfig(fx).proxy_cmd, SANDBOX_PROXY_CMD);
+  // Not saved: the pilotctl that comes with -proxy-cmd derives it on every
+  // start, and only while the proxy comes from the environment. A saved
+  // "proxy_cmd" would replace a proxy set explicitly later.
+  assert.equal(readConfig(fx).proxy_cmd, undefined);
   assert.equal(result.proxy_refresh, 'proxy-cmd');
+  assert.equal(result.proxy_replaced_by, undefined);
   assert.equal(result.trust_verified, true);
   const output = lines.join('\n');
   assert.match(output, /re-reads them every 60s and on a 407/);
-  assert.match(output, /Saved it as "proxy_cmd" in .*config\.json/);
+  assert.match(output, /It is not saved in config\.json:\n.*pilotctl hands it to every later daemon start here itself, while the proxy comes from HTTPS_PROXY/);
+  assert.match(output, /Egress proxy http:\/\/\*\*\*@proxy\.muse\.internal:3128 \(HTTPS_PROXY\): pilot-daemon picks its transport itself/);
   assert.doesNotMatch(output + readFileSync(fx.config, 'utf8'), /s3cr3t|muse-agent/);
 
-  // The next setup finds it in config.json: nothing is handed over or saved
-  // again, and pilot-daemon reads it from there.
-  const again = [];
-  const second = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: (line) => again.push(line) });
-  assert.equal(fx.calls()[2].env.PILOT_PROXY_CMD, '<unset>');
+  // The next setup in the same sandbox hands it over again.
+  const second = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: () => {} });
+  assert.equal(fx.calls().at(-2).env.PILOT_PROXY_CMD, SANDBOX_PROXY_CMD);
   assert.equal(second.proxy_refresh, 'proxy-cmd');
-  assert.match(again.join('\n'), /re-reads them with the proxy command from config\.json proxy_cmd/);
-  assert.doesNotMatch(again.join('\n'), /Saved/);
+  assert.equal(readConfig(fx).proxy_cmd, undefined);
+
+  // A proxy set explicitly later is used as it is: nothing setup did in the
+  // sandbox stands in for it.
+  const explicit = 'http://127.0.0.1:41282';
+  const later = [];
+  const third = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY, PILOT_PROXY: explicit }), home: fx.home, host: SANDBOX, log: (line) => later.push(line),
+  });
+  const last = fx.calls().at(-2);
+  assert.deepEqual(last.args, ['daemon', 'start']);
+  assert.equal(last.env.PILOT_PROXY_CMD, '<unset>');
+  assert.equal(last.env.PILOT_PROXY, explicit);
+  assert.equal(third.proxy, explicit);
+  assert.equal(third.proxy_refresh, undefined);
+  assert.equal(third.proxy_replaced_by, undefined);
+  assert.match(later.join('\n'), /Egress proxy http:\/\/127\.0\.0\.1:41282 \(PILOT_PROXY\): pilot-daemon picks/);
+  assert.equal(proxyCommandFor(fx.env({ HTTPS_PROXY: PROXY, PILOT_PROXY: explicit }), readConfig(fx), SANDBOX), null);
+});
+
+test('a saved sandbox-default proxy_cmd never replaces an explicit proxy unannounced', { skip }, async (t) => {
+  const explicit = 'http://127.0.0.1:41282';
+  // install.sh saves the sandbox default as "proxy_cmd"; pilot-daemon runs
+  // it in place of an explicit proxy, so setup says so and how to undo it.
+  let fx = fixture(t, CMD_USAGE);
+  withConfig(fx, { proxy_cmd: SANDBOX_PROXY_CMD });
+  let lines = [];
+  let result = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY, PILOT_PROXY: explicit }), home: fx.home, host: SANDBOX, log: (line) => lines.push(line),
+  });
+  let output = lines.join('\n');
+  assert.equal(result.proxy, explicit);
+  assert.equal(result.proxy_refresh, 'proxy-cmd');
+  assert.equal(result.proxy_replaced_by, 'config.json proxy_cmd');
+  assert.match(output, /Egress proxy from the proxy command in config\.json proxy_cmd \(in place of http:\/\/127\.0\.0\.1:41282 from PILOT_PROXY\): pilot-daemon picks/);
+  assert.match(output, /Warning: config\.json "proxy_cmd" is the sandbox default install\.sh saves;/);
+  assert.match(output, /pilot-daemon uses that proxy instead of http:\/\/127\.0\.0\.1:41282 \(PILOT_PROXY\)\.\n.*To use PILOT_PROXY, remove it: pilotctl config --set proxy_cmd=$/);
+  assert.equal(readConfig(fx).proxy_cmd, SANDBOX_PROXY_CMD, 'what install.sh saved is left alone');
+  // Setup's own downloads use the explicit proxy: the saved default stands
+  // in only for the proxy environment.
+  assert.equal(proxyCommandFor(fx.env({ HTTPS_PROXY: PROXY, PILOT_PROXY: explicit }), readConfig(fx), SANDBOX), null);
+  assert.equal(proxyCommandFor(fx.env({ HTTPS_PROXY: PROXY, PILOT_PROXY: 'off' }), readConfig(fx), SANDBOX), null);
+  assert.deepEqual(proxyCommandFor(fx.env({ HTTPS_PROXY: PROXY }), readConfig(fx), NOT_SANDBOX), { command: SANDBOX_PROXY_CMD, source: 'config.json proxy_cmd' });
+
+  // With the proxy from the environment it is simply the sandbox default.
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: (line) => lines.push(line) });
+  assert.equal(result.proxy_replaced_by, undefined);
+  assert.doesNotMatch(lines.join('\n'), /Warning|in place of/);
+
+  // A command the user configured replaces an explicit proxy by design (as
+  // -proxy-cmd documents): said, not warned about, and still used for downloads.
+  const mine = "sh -c 'cat /run/secrets/proxy-url'";
+  fx = fixture(t, CMD_USAGE);
+  withConfig(fx, { proxy_cmd: mine, proxy: explicit });
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: (line) => lines.push(line) });
+  output = lines.join('\n');
+  assert.equal(result.proxy_replaced_by, 'config.json proxy_cmd');
+  assert.match(output, /pilot-daemon uses the proxy URL that command prints in place of http:\/\/127\.0\.0\.1:41282 \(config\.json proxy\)\./);
+  assert.doesNotMatch(output, /Warning|run\/secrets/);
+  assert.deepEqual(proxyCommandFor(fx.env({ PILOT_PROXY: explicit }), readConfig(fx), SANDBOX), { command: mine, source: 'config.json proxy_cmd' });
 });
 
 test('a proxy command the user configured is honoured and never replaced', { skip }, async (t) => {
@@ -938,6 +1092,44 @@ test('doctor reports the proxy command and a daemon that ignores it, never the c
   assert.doesNotMatch(stdout, /s3cr3t|muse-agent/);
 });
 
+test('doctor says when a proxy command replaces an explicit proxy, and warns about a saved sandbox default', { skip }, async (t) => {
+  const cli = new URL('../cli.js', import.meta.url).pathname;
+  const doctor = async (fx, extra = {}, args = ['--json']) => (await promisify(execFile)(process.execPath, [cli, 'doctor', ...args], {
+    env: { HOME: fx.home, PATH: '/usr/bin:/bin', PILOTCTL_BIN: fx.pilotctl, PILOT_SOCKET: join(fx.work, 'missing.sock'), ...extra },
+  })).stdout;
+  const explicit = 'http://127.0.0.1:41282';
+  // install.sh's saved sandbox default with PILOT_PROXY set.
+  let fx = fixture(t, CMD_USAGE);
+  withConfig(fx, { proxy_cmd: SANDBOX_PROXY_CMD });
+  let stdout = await doctor(fx, { HTTPS_PROXY: PROXY, PILOT_PROXY: explicit });
+  let report = JSON.parse(stdout);
+  assert.equal(report.network.proxy, explicit);
+  assert.deepEqual(report.network.proxy_cmd, { source: 'config.json proxy_cmd', daemon_support: true, replaces: 'PILOT_PROXY' });
+  assert.match(report.network.warnings.join('\n'), /config\.json "proxy_cmd" is the sandbox default install\.sh saves: pilot-daemon uses the proxy it prints .* instead of http:\/\/127\.0\.0\.1:41282 from PILOT_PROXY\. To use PILOT_PROXY, remove it: pilotctl config --set proxy_cmd=$/);
+  assert.doesNotMatch(stdout, /s3cr3t|muse-agent/);
+  const text = await doctor(fx, { HTTPS_PROXY: PROXY, PILOT_PROXY: explicit }, []);
+  assert.match(text, /^Egress proxy: http:\/\/127\.0\.0\.1:41282 via PILOT_PROXY, replaced for pilot-daemon by the URL the proxy command from config\.json proxy_cmd prints \(pilot-daemon -proxy: supported\)$/m);
+  // Proxy from the environment: the default is what it looks like, no note.
+  report = JSON.parse(await doctor(fx, { HTTPS_PROXY: PROXY }));
+  assert.deepEqual(report.network.proxy_cmd, { source: 'config.json proxy_cmd', daemon_support: true });
+  assert.equal(report.network.warnings, undefined);
+
+  // A user's own command over a config.json "proxy" URL: reported, not warned.
+  fx = fixture(t, CMD_USAGE);
+  withConfig(fx, { proxy_cmd: 'cat /run/secrets/proxy-url', proxy: explicit });
+  stdout = await doctor(fx, { HTTPS_PROXY: PROXY });
+  report = JSON.parse(stdout);
+  assert.equal(report.network.proxy_cmd.replaces, 'config.json proxy');
+  assert.equal(report.network.warnings, undefined);
+  assert.doesNotMatch(stdout, /run\/secrets/);
+  // A daemon without -proxy-cmd ignores the command: nothing is replaced.
+  fx = fixture(t, AUTO_USAGE);
+  withConfig(fx, { proxy_cmd: SANDBOX_PROXY_CMD });
+  report = JSON.parse(await doctor(fx, { PILOT_PROXY: explicit }));
+  assert.equal(report.network.proxy_cmd.replaces, undefined);
+  assert.match(report.network.warnings.join('\n'), /predates -proxy-cmd and ignores it/);
+});
+
 test('-proxy support is read from the daemon\'s flag list', { skip }, (t) => {
   const fx = fixture(t, PROXY_USAGE);
   assert.equal(supportsEgressProxy(fx.daemon), true);
@@ -1088,7 +1280,10 @@ test('doctor takes the "transport": "auto" install.sh saves as valid, unless the
 
 // fixture builds a HOME with a Pilot config plus a fake pilotctl (recording
 // its argv and proxy environment) and a sibling fake pilot-daemon whose -h
-// output is `usage`.
+// output is `usage`. Like the real pilotctl, `daemon status --check` succeeds
+// only while a daemon is up, `daemon start` refuses while one is, and after
+// fx.startFails() a started daemon never comes up (pilotctl's "did not
+// become ready" timeout) but runs until `daemon stop`.
 function fixture(t, usage) {
   // Resolved so paths compare equal to pilotctl-style symlink resolution
   // (macOS tmpdir lives behind the /var -> /private/var link).
@@ -1106,6 +1301,9 @@ function fixture(t, usage) {
   // transport check refuse, as the real ones do on every transport, and a
   // daemon that did not start answers no send-message.
   const dead = join(work, 'daemon-dead');
+  const up = join(work, 'daemon-up');
+  const spawned = join(work, 'daemon-spawned');
+  const startFails = join(work, 'start-fails');
   writeFileSync(pilotctl, `#!/bin/sh
 {
   printf 'ARGS'; for arg in "$@"; do printf '\\t%s' "$arg"; done; printf '\\n'
@@ -1118,6 +1316,14 @@ if [ "$1 $2" = "daemon start" ]; then
     *) echo "daemon start: invalid transport" >&2; : > '${dead}'; exit 1 ;;
   esac
   case "\${PILOT_PROXY-}" in ''|auto|off|http://?*|https://?*) ;; *) echo "-proxy: invalid proxy" >&2; : > '${dead}'; exit 1 ;; esac
+  if [ -e '${up}' ]; then echo "daemon is already running" >&2; exit 1; fi
+  if [ -e '${startFails}' ]; then echo "error: daemon started (pid 4958) but did not become ready within 15s" >&2; : > '${dead}'; : > '${spawned}'; exit 1; fi
+  : > '${up}'
+fi
+if [ "$1 $2" = "daemon status" ]; then [ -e '${up}' ] && exit 0; exit 1; fi
+if [ "$1 $2" = "daemon stop" ]; then
+  [ -e '${up}' ] || [ -e '${spawned}' ] || { echo "daemon is not running" >&2; exit 1; }
+  rm -f '${up}' '${spawned}'
 fi
 if [ "$1" = send-message ]; then
   if [ -e '${dead}' ]; then printf '%s\\n' '{"ok":false}'; exit 1; fi
@@ -1143,6 +1349,9 @@ exit 0
     pilotctl,
     daemon,
     writeDaemon,
+    startFails: () => writeFileSync(startFails, ''),
+    markRunning: () => writeFileSync(up, ''),
+    alive: () => existsSync(up) || existsSync(spawned),
     env: (extra) => ({ PILOTCTL_BIN: pilotctl, PATH: '/usr/bin:/bin', ...extra }),
     calls: () => {
       let text = '';
@@ -1160,6 +1369,12 @@ exit 0
       return calls;
     },
   };
+}
+
+// startCall is the fake pilotctl's `daemon start` call (a status check may
+// come first).
+function startCall(fx) {
+  return fx.calls().find((call) => call.args[0] === 'daemon' && call.args[1] === 'start');
 }
 
 function readConfig(fx) {

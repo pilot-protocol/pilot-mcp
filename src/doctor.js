@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { daemonBinaryPath, daemonHealthy, pilotctlBinaryPath } from './daemon-bridge.js';
-import { configuredProxyCommand, redactProxyURL } from './netproxy.js';
+import { configuredProxyCommand, isEnvironmentProxySource, isSavedSandboxDefault, redactProxyURL } from './netproxy.js';
 import { daemonProxyView, daemonSettingWarnings, PILOT_SANDBOX_SKILL_URL } from './setup/daemon.js';
 import { detectHarnesses } from './setup/detect.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport } from './setup/pilot-config.js';
@@ -31,7 +31,8 @@ export async function runDoctor(flags = {}, options = {}) {
     write(`Runtime: ${report.runtime.ok ? report.runtime.path : report.runtime.error}`);
     write(`Daemon: ${report.daemon.healthy ? 'reachable' : 'not reachable'}`);
     if (report.network.proxy) {
-      write(`Egress proxy: ${report.network.proxy} via ${report.network.source} (pilot-daemon -proxy: ${report.network.daemon_proxy_support ? 'supported' : `not supported; see ${PILOT_SANDBOX_SKILL_URL}`})`);
+      const replaced = report.network.proxy_cmd?.replaces ? `, replaced for pilot-daemon by the URL the proxy command from ${report.network.proxy_cmd.source} prints` : '';
+      write(`Egress proxy: ${report.network.proxy} via ${report.network.source}${replaced} (pilot-daemon -proxy: ${report.network.daemon_proxy_support ? 'supported' : `not supported; see ${PILOT_SANDBOX_SKILL_URL}`})`);
     } else if (report.network.mode === 'off') {
       write(`Egress proxy: off (${report.network.setting})`);
     }
@@ -61,8 +62,9 @@ function runtimeCheck() {
 // the mode behind it, whether the daemon pilotctl would launch supports it,
 // any proxy or transport setting that is ignored or refused (judged against
 // that daemon: "auto" is valid for one with -transport=auto), the proxy
-// command that re-reads rotating credentials (never the command itself), and
-// the transport recorded in ~/.pilot/config.json.
+// command that re-reads rotating credentials (never the command itself) and
+// whether its URL replaces an explicitly set proxy (`proxy_cmd.replaces`),
+// and the transport recorded in ~/.pilot/config.json.
 function networkCheck(env, home) {
   const { path, config } = readPilotConfig(home);
   let features;
@@ -92,6 +94,12 @@ function networkCheck(env, home) {
     report.proxy_cmd = { source: command.source, daemon_support: runtime().proxyCmd };
     if (runtime().known && !runtime().proxyCmd) {
       warnings.push(`${command.source} is set, but the installed pilot-daemon predates -proxy-cmd and ignores it, so rotated proxy credentials are not re-read. Update the Pilot runtime, or use the pilot-sandbox egress relay (${EGRESS_RELAY_URL}).`);
+    } else if (runtime().proxyCmd && proxy && !isEnvironmentProxySource(proxy.source)) {
+      // -proxy-cmd supplies the URL -proxy would use, the explicit one too.
+      report.proxy_cmd.replaces = proxy.source;
+      if (isSavedSandboxDefault(command)) {
+        warnings.push(`config.json "proxy_cmd" is the sandbox default install.sh saves: pilot-daemon uses the proxy it prints (a fresh bash's https_proxy/HTTPS_PROXY) instead of ${redactProxyURL(proxy.url)} from ${proxy.source}. To use ${proxy.source}, remove it: pilotctl config --set proxy_cmd=`);
+      }
     }
   }
   if (warnings.length) report.warnings = warnings;

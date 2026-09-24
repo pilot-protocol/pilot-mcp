@@ -9,8 +9,11 @@
 //   1. hands a pilot-daemon with -proxy-cmd a proxy command: the one the user
 //      configured ($PILOT_PROXY_CMD, config.json "proxy_cmd"), or in a
 //      sandbox whose proxy carries credentials the sandbox default (a fresh
-//      bash, which sees the current credentials), which it also saves as
-//      config.json "proxy_cmd", as install.sh does, so later starts keep it;
+//      bash, which sees the current credentials). The sandbox default is
+//      handed over for this start only and never saved: the pilotctl that
+//      comes with -proxy-cmd derives it on every start itself, and only
+//      while the proxy comes from the environment, whereas a saved
+//      "proxy_cmd" would replace a proxy URL set explicitly later;
 //   2. for a daemon with -proxy but without -proxy-cmd, points its
 //      HTTPS_PROXY at the pilot-sandbox skill's egress_relay.py on
 //      127.0.0.1:3128 (started if it is not running), which re-reads the
@@ -29,7 +32,10 @@ import process from 'node:process';
 import {
   configuredProxyCommand,
   findExecutable,
+  isEnvironmentProxySource,
+  isSavedSandboxDefault,
   proxyHasCredentials,
+  redactProxyURL,
   SANDBOX_PROXY_CMD,
   sandboxHost,
 } from '../netproxy.js';
@@ -55,17 +61,19 @@ const SKILL_DIRS = [
 
 // planProxyRefresh decides how the daemon setup starts keeps its proxy
 // credentials fresh. It returns:
-//   mode     'none'        nothing to do: no proxy for this start, no
-//                          credentials to rotate, or not a sandbox and
-//                          nothing configured
-//            'proxy-cmd'   the daemon re-reads them with a proxy command
-//            'relay'       the daemon goes through egress_relay.py
-//            'stale'       none of that is possible: the daemon keeps the
-//                          credentials it starts with
-//   source   where the proxy command came from (proxy-cmd)
-//   env      environment overrides for `pilotctl daemon start`
-//   save     a proxy_cmd to save in config.json, or undefined
-//   lines    log lines (never a credential or the command's output)
+//   mode      'none'        nothing to do: no proxy for this start, no
+//                           credentials to rotate, or not a sandbox and
+//                           nothing configured
+//             'proxy-cmd'   the daemon re-reads them with a proxy command
+//             'relay'       the daemon goes through egress_relay.py
+//             'stale'       none of that is possible: the daemon keeps the
+//                           credentials it starts with
+//   source    where the proxy command came from (proxy-cmd)
+//   replaces  true when a configured proxy command takes the place of a
+//             proxy URL set explicitly (PILOT_PROXY, config.json "proxy"):
+//             pilot-daemon uses the URL the command prints instead
+//   env       environment overrides for `pilotctl daemon start`
+//   lines     log lines (never a credential or the command's output)
 // `plan` is planDaemonStart's; `features` describes the daemon. `relay`
 // ({ find, ensure, address }) overrides how egress_relay.py is found and
 // started, and where it listens (tests).
@@ -84,16 +92,19 @@ export async function planProxyRefresh({ plan, features, env = process.env, conf
 
   if (features.proxyCmd) {
     if (configured) {
-      return { mode: 'proxy-cmd', source: configured.source, env: {}, lines: [`Proxy credentials: pilot-daemon re-reads them with the proxy command from ${configured.source} (every 60s and on a 407).`] };
+      const lines = [`Proxy credentials: pilot-daemon re-reads them with the proxy command from ${configured.source} (every 60s and on a 407).`];
+      const replaces = !isEnvironmentProxySource(plan.source);
+      if (replaces) lines.push(...replacedProxyLines(configured, plan));
+      return { mode: 'proxy-cmd', source: configured.source, replaces, env: {}, lines };
     }
     return {
       mode: 'proxy-cmd',
       source: 'sandbox default',
       env: { PILOT_PROXY_CMD: SANDBOX_PROXY_CMD },
-      save: SANDBOX_PROXY_CMD,
       lines: [
         'This sandbox\'s proxy credentials can rotate: pilot-daemon re-reads them every 60s and on a 407',
-        `with the proxy command ${SANDBOX_PROXY_CMD}.`,
+        `with the proxy command ${SANDBOX_PROXY_CMD}. It is not saved in config.json:`,
+        'pilotctl hands it to every later daemon start here itself, while the proxy comes from HTTPS_PROXY.',
       ],
     };
   }
@@ -104,7 +115,7 @@ export async function planProxyRefresh({ plan, features, env = process.env, conf
   // The relay stands in for the environment's proxy (HTTPS_PROXY outranks
   // the other proxy variables); an explicit PILOT_PROXY or config.json
   // "proxy" URL is left alone.
-  if (!ENVIRONMENT_PROXY_VARS.has(plan.source)) {
+  if (!isEnvironmentProxySource(plan.source)) {
     return stale(reason, `the proxy is set explicitly (${plan.source}), which the egress relay does not replace`);
   }
   const script = (relay.find ?? findEgressRelay)({ home, env });
@@ -126,7 +137,21 @@ export async function planProxyRefresh({ plan, features, env = process.env, conf
   };
 }
 
-const ENVIRONMENT_PROXY_VARS = new Set(['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']);
+// replacedProxyLines says that pilot-daemon runs the configured proxy
+// command in place of the proxy URL set explicitly, as -proxy-cmd does. The
+// sandbox default install.sh saves is no choice of proxy, so it gets a
+// warning and the way to remove it.
+function replacedProxyLines(configured, plan) {
+  const explicit = `${redactProxyURL(plan.proxy)} (${plan.source})`;
+  if (!isSavedSandboxDefault(configured)) {
+    return [`pilot-daemon uses the proxy URL that command prints in place of ${explicit}.`];
+  }
+  return [
+    `Warning: config.json "proxy_cmd" is the sandbox default install.sh saves; it prints the proxy in a fresh`,
+    `bash's https_proxy/HTTPS_PROXY, and pilot-daemon uses that proxy instead of ${explicit}.`,
+    `To use ${plan.source}, remove it: pilotctl config --set proxy_cmd=`,
+  ];
+}
 
 function stale(reason, detail) {
   return {

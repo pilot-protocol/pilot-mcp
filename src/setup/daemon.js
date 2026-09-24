@@ -39,6 +39,15 @@
 // Where the proxy rotates its credentials (Meta Muse), the daemon gets a
 // proxy command (-proxy-cmd) or the pilot-sandbox egress relay; see
 // proxy-refresh.js.
+//
+// A daemon without -proxy cannot use the proxy at all. Behind a proxy with
+// UDP blocked (every released runtime up to v1.13.9 and v1.13.10-rc.1),
+// setup still starts it, since some hosts let it out directly, but when it
+// neither comes up nor answers the trust check the result says the network
+// is unreachable (`network_unreachable`), and a daemon setup itself started
+// is stopped again (`daemon_stopped`) instead of being left to retry direct
+// registry dials (v1.13.9 gives up after 10 attempts, about 50s) that a
+// proxy-only sandbox refuses.
 
 import { homedir } from 'node:os';
 import process from 'node:process';
@@ -83,6 +92,8 @@ export async function installDaemon({
 
   let plan = { mode: 'default', transport, transportSource: 'probe', warnings: [] };
   let refresh = { mode: 'none', env: {}, lines: [] };
+  let started = null;
+  let runningBefore = null;
   if (autoStart) {
     if (enterpriseControl) {
       const status = await execPilotctl(['daemon', 'status', '--check'], { capture: true });
@@ -112,15 +123,19 @@ export async function installDaemon({
     }
     for (const warning of plan.warnings) log(`  Warning: ${warning}`);
     syncRecordedTransport(home, plan, log);
+    if (plan.mode === 'compat-proxy' || plan.mode === 'auto') {
+      const { config } = readPilotConfig(home);
+      refresh = await planProxyRefresh({ plan, features: plan.runtime(), env, config: config ?? {}, home, host, relay });
+    }
     const startArgs = ['daemon', 'start'];
     if (plan.mode === 'compat-proxy') {
       startArgs.push('--transport', 'compat');
-      log(`  Egress proxy ${redactProxyURL(plan.proxy)} (${plan.source}): starting pilot-daemon with -transport=compat through it.`);
+      log(`  Egress proxy ${describeProxy(plan, refresh)}: starting pilot-daemon with -transport=compat through it.`);
     } else if (plan.mode === 'auto') {
       // No --transport: pilotctl hands the daemon the "auto" it resolves
       // itself, so this start is the one every later start repeats.
       if (plan.proxy) {
-        log(`  Egress proxy ${redactProxyURL(plan.proxy)} (${plan.source}): pilot-daemon picks its transport itself (-transport=auto) and, with UDP blocked, runs compat through it.`);
+        log(`  Egress proxy ${describeProxy(plan, refresh)}: pilot-daemon picks its transport itself (-transport=auto) and, with UDP blocked, runs compat through it.`);
       } else if (plan.probe === 'compat') {
         log('  pilot-daemon picks its transport itself on every start (-transport=auto): compat (WSS over TCP/443) while UDP is blocked and TCP 443 is reachable.');
       }
@@ -128,17 +143,15 @@ export async function installDaemon({
       log(`  Egress proxy ${redactProxyURL(plan.proxy)} is set and UDP is blocked, but ${plan.daemon ?? 'pilot-daemon'}`);
       log('  has no -proxy flag, so it cannot reach the Pilot registry through the proxy.');
       log(`  Update the Pilot runtime, or follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`);
+      // Known before the start, so that only a daemon setup started itself
+      // is stopped again if it cannot come up.
+      runningBefore = (await execPilotctl(['daemon', 'status', '--check'], { capture: true })).code === 0;
     } else {
       for (const line of plan.compatHint ?? []) log(`  ${line}`);
     }
-    if (plan.mode === 'compat-proxy' || plan.mode === 'auto') {
-      const { config } = readPilotConfig(home);
-      refresh = await planProxyRefresh({ plan, features: plan.runtime(), env, config: config ?? {}, home, host, relay });
-      for (const line of refresh.lines) log(`  ${line}`);
-      if (refresh.save) saveProxyCommand(home, refresh.save, log);
-    }
+    for (const line of refresh.lines) log(`  ${line}`);
     if (enterpriseControl) startArgs.push('--enterprise-control', enterpriseControl);
-    const started = await execPilotctl(startArgs, {
+    started = await execPilotctl(startArgs, {
       capture: Boolean(enterpriseControl),
       env: { ...daemonEnvironment(env, plan.runtime), ...refresh.env },
     });
@@ -160,6 +173,32 @@ export async function installDaemon({
   // today's
   // install silently leaves the user to discover trust-propagation races,
   // UDP-blocked transports, and stale daemons themselves.
+  const outcome = { ...(await trustCheck()), ...egressSummary(plan, refresh) };
+  if (plan.mode === 'proxy-unsupported' && !outcome.trust_verified) {
+    // The daemon cannot use the proxy and did not get out without it: this
+    // does not resolve by waiting, only with a runtime that has -proxy or
+    // the pilot-sandbox skill.
+    outcome.network_unreachable = true;
+    outcome.hint = `pilot-daemon has no -proxy flag and could not reach the Pilot network from this host without the egress proxy. Follow the pilot-sandbox skill (${PILOT_SANDBOX_SKILL_URL}), or re-run setup once a Pilot runtime whose pilot-daemon has -proxy is released.`;
+    if (runningBefore === false && started && started.code !== 0) {
+      const stopped = await execPilotctl(['daemon', 'stop'], { capture: true });
+      if (stopped.code === 0) {
+        outcome.daemon_stopped = true;
+        log('  Stopped the pilot-daemon setup started: it did not come up, and without -proxy it can only dial');
+        log('  the Pilot registry directly, which does not work from this host.');
+      } else {
+        const reason = String(stopped.stderr || stopped.stdout).trim().split('\n')[0].slice(0, 200);
+        log(`  Could not stop the pilot-daemon setup started (${reason || `pilotctl exit ${stopped.code}`}); it gives up on its own once its registry retries run out.`);
+      }
+    }
+  }
+  return outcome;
+}
+
+// trustCheck is setup's smoke test: a 1-item search to list-agents, which
+// needs the daemon registered, the backbone reachable and trust with the
+// catalog auto-approved.
+async function trustCheck() {
   try {
     const result = await pilotctlJSON([
       'send-message', 'list-agents',
@@ -171,22 +210,15 @@ export async function installDaemon({
         reachable: false,
         trust_verified: false,
         hint: 'Daemon is up but trust handshake with list-agents did not complete. Most common cause: UDP blocked (try compat mode) or first-run registry propagation. Run `pilot-mcp doctor` and retry in 60s.',
-        ...egressSummary(plan, refresh),
       };
     }
-    return {
-      reachable: true,
-      trust_verified: true,
-      catalog_sample: result?.data,
-      ...egressSummary(plan, refresh),
-    };
+    return { reachable: true, trust_verified: true, catalog_sample: result?.data };
   } catch (err) {
     return {
       reachable: false,
       trust_verified: false,
       error: err.message,
       hint: 'Daemon is running but trust handshake with list-agents failed. Run `pilot-mcp doctor` for diagnostics.',
-      ...egressSummary(plan, refresh),
     };
   }
 }
@@ -446,22 +478,6 @@ function syncRecordedTransport(home, plan, log) {
   if (wanted && !theirs) log(`  Recorded "transport": "compat" in ${path}; setup removes it again once UDP works.`);
 }
 
-// saveProxyCommand saves the sandbox proxy command as config.json
-// "proxy_cmd", as install.sh does, so every later start of the daemon
-// (pilotctl, or a script passing -config) re-reads rotated credentials too.
-// A proxy_cmd already there is never replaced.
-function saveProxyCommand(home, command, log) {
-  const { path, config, error } = readPilotConfig(home);
-  if (!config) {
-    log(`  Could not read ${path} (${error}); "proxy_cmd" is not saved, so only this start re-reads the credentials.`);
-    return;
-  }
-  if (typeof config.proxy_cmd === 'string' && config.proxy_cmd.trim()) return;
-  config.proxy_cmd = command;
-  writePilotConfig(home, config);
-  log(`  Saved it as "proxy_cmd" in ${path}, so later starts re-read them too.`);
-}
-
 function daemonEnvironment(env, features) {
   const forwarded = {};
   for (const name of DAEMON_PROXY_ENV) {
@@ -476,7 +492,9 @@ function daemonEnvironment(env, features) {
 // runtime that applies it, chose one. "auto" means the daemon picks udp or
 // compat itself; `proxy` is then the one it uses while UDP is blocked.
 // `proxy_refresh` says how rotating proxy credentials reach the daemon
-// (proxy-cmd, relay, or stale), when they can rotate.
+// (proxy-cmd, relay, or stale), when they can rotate, and
+// `proxy_replaced_by` names the proxy command whose URL the daemon uses in
+// place of an explicitly set `proxy`.
 function egressSummary(plan, refresh = { mode: 'none' }) {
   let transport = 'udp';
   if (plan.mode === 'compat-proxy') transport = 'compat';
@@ -484,7 +502,20 @@ function egressSummary(plan, refresh = { mode: 'none' }) {
   const summary = { transport };
   if (plan.mode === 'default' || !plan.proxy) return summary;
   const proxied = { ...summary, proxy: redactProxyURL(plan.proxy), proxy_supported: plan.mode !== 'proxy-unsupported' };
-  return refresh.mode === 'none' ? proxied : { ...proxied, proxy_refresh: refresh.mode };
+  if (refresh.mode === 'none') return proxied;
+  return refresh.replaces
+    ? { ...proxied, proxy_refresh: refresh.mode, proxy_replaced_by: refresh.source }
+    : { ...proxied, proxy_refresh: refresh.mode };
+}
+
+// describeProxy names the proxy the daemon goes through for the log: the
+// one setup resolved, or, where a configured proxy command replaces that
+// explicit URL, the command.
+function describeProxy(plan, refresh) {
+  const resolved = redactProxyURL(plan.proxy);
+  return refresh.replaces
+    ? `from the proxy command in ${refresh.source} (in place of ${resolved} from ${plan.source})`
+    : `${resolved} (${plan.source})`;
 }
 
 function locatePilotctl(env) {

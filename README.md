@@ -147,8 +147,22 @@ openclaw plugins inspect pilot-policy --runtime --json
 
 Hosted agent VMs such as Meta Muse block UDP, poison DNS for the Pilot
 hostnames, and only let traffic out through an authenticating `HTTPS_PROXY`
-that allows `CONNECT` to port 443. `npx -y pilotprotocol-mcp setup` works
-there, as a normal user or as root, and needs no systemd or launchd:
+that allows `CONNECT` to port 443. `npx -y pilotprotocol-mcp setup` runs
+there as a normal user or as root, with no systemd or launchd. It installs
+the runtime and the harness adapters through the proxy. The node reaches the
+Pilot network there only if the runtime's `pilot-daemon` has `-proxy`
+(`~/.pilot/bin/pilot-daemon -h` lists it). v1.13.9 and v1.13.10-rc.1 do not
+have it; it arrives with pilot-protocol/pilotprotocol#470. With such an
+older runtime, setup:
+
+- says the node cannot reach the Pilot network, and why;
+- stops the daemon it started if that daemon did not come up;
+- points at the
+  [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox),
+  which brings the node online today;
+- exits 1.
+
+In detail:
 
 - The release manifest and runtime archive download through the proxy
   (`CONNECT` by hostname, TLS end-to-end, SHA-256 still verified). Proxy
@@ -192,6 +206,11 @@ there, as a normal user or as root, and needs no systemd or launchd:
   unknown version, and a runtime installed elsewhere are never replaced.
   Otherwise setup keeps the runtime and points at the
   [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox).
+  It still starts that daemon, since some hosts let it out directly. If the
+  daemon then fails the trust check, the summary does not say trust will
+  resolve by itself. It says the node cannot reach the Pilot network and
+  how to fix that. A daemon setup started that never came up is stopped
+  again, and setup exits 1.
 - When UDP is blocked and no proxy is in use, the daemon starts with its
   default transport (udp), as before, and setup prints the commands that
   switch the installed runtime to compat mode: `pilotctl config --set
@@ -214,10 +233,19 @@ there, as a normal user or as root, and needs no systemd or launchd:
   do.
   - Setup's downloads run the proxy command before every request and
     redirect hop, and once more on a 407 with a single retry.
-  - A `pilot-daemon` with `-proxy-cmd` gets the command: the sandbox default
-    is handed over as `PILOT_PROXY_CMD` and saved as `"proxy_cmd"` (never over
-    one that is there), so later starts keep re-reading the credentials; a
-    configured command is left for the daemon to read.
+  - A `pilot-daemon` with `-proxy-cmd` gets the command. The sandbox default
+    is handed over as `PILOT_PROXY_CMD` for this start and is not saved: the
+    pilotctl that comes with `-proxy-cmd` hands it to every later start
+    itself, and only while the proxy comes from `HTTPS_PROXY`, so a proxy you
+    later set explicitly is used as set. A configured command is left for
+    the daemon to read.
+  - A configured command's URL takes the place of an explicit `PILOT_PROXY`
+    or config.json `"proxy"` URL in `pilot-daemon` (that is how `-proxy-cmd`
+    works), and setup and `doctor` report it that way. A `"proxy_cmd"` equal
+    to the sandbox default, which `install.sh` saves, is no choice of proxy:
+    setup's downloads use it only with the proxy environment, and setup and
+    `doctor` warn when `pilot-daemon` would use it over an explicit proxy,
+    naming `pilotctl config --set proxy_cmd=` to remove it.
   - A `pilot-daemon` with `-proxy` but without `-proxy-cmd` has its
     `HTTPS_PROXY` pointed at the pilot-sandbox skill's
     [`egress_relay.py`](https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-sandbox/scripts/egress_relay.py)
@@ -228,9 +256,10 @@ there, as a normal user or as root, and needs no systemd or launchd:
     the relay.
 - `npx -y pilotprotocol-mcp doctor` shows the proxy the daemon would use
   (credentials redacted) or `off` and which setting chose it, whether the
-  daemon can use the proxy, where a proxy command comes from and whether the
-  daemon supports it, any proxy or transport setting that is ignored or
-  refused, and the recorded transport.
+  daemon can use the proxy, where a proxy command comes from, whether the
+  daemon supports it and whether its URL replaces an explicit proxy, any
+  proxy or transport setting that is ignored or refused, and the recorded
+  transport.
 
 ## Privacy and optional management
 

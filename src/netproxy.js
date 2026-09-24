@@ -255,10 +255,34 @@ export function sandboxProxyCommandApplies(env = process.env, host = sandboxHost
 
 // proxyCommandFor is the proxy command setup's own downloads use: the
 // configured one, else SANDBOX_PROXY_CMD where it applies. null when none.
+// A saved sandbox default (see isSavedSandboxDefault) stands in only for
+// the proxy environment, as the default pilotctl derives does: with
+// PILOT_PROXY set to a URL (or off) it is not used.
 export function proxyCommandFor(env = process.env, config = {}, host = sandboxHost(env)) {
   const configured = configuredProxyCommand(env, config);
+  if (configured && isSavedSandboxDefault(configured)) return inspectProxy(env).mode === 'auto' ? configured : null;
   if (configured) return configured;
   return sandboxProxyCommandApplies(env, host) ? { command: SANDBOX_PROXY_CMD, source: 'sandbox default' } : null;
+}
+
+// isSavedSandboxDefault reports whether a configured proxy command (from
+// configuredProxyCommand) is config.json "proxy_cmd" holding exactly
+// SANDBOX_PROXY_CMD, the sandbox default install.sh saves. It prints the
+// environment's proxy, so it is no choice of proxy; pilot-daemon still runs
+// it in place of an explicit proxy URL, which setup and doctor warn about.
+export function isSavedSandboxDefault(configured) {
+  return configured?.source === 'config.json proxy_cmd' && configured.command === SANDBOX_PROXY_CMD;
+}
+
+// The proxy environment variables the daemon's proxy can come from. A proxy
+// from any other source (PILOT_PROXY, config.json "proxy") was set
+// explicitly.
+const ENVIRONMENT_PROXY_SOURCES = new Set(['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']);
+
+// isEnvironmentProxySource: the proxy comes from the proxy environment
+// (inspectProxy's `proxy.source`), not from an explicit setting.
+export function isEnvironmentProxySource(source) {
+  return ENVIRONMENT_PROXY_SOURCES.has(source);
 }
 
 // proxyHasCredentials reports whether a proxy URL carries a user name.
