@@ -49,7 +49,10 @@ async function main() {
     }
     case 'setup': {
       const { runSetup } = await import('./src/setup/index.js');
-      await runSetup(parseFlags(args.slice(1)));
+      const result = await runSetup(parseFlags(args.slice(1)));
+      // The node cannot reach the Pilot network with this runtime; the
+      // summary says what to do instead.
+      if (result?.ok === false) process.exitCode = 1;
       break;
     }
     case 'attach': {

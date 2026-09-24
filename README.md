@@ -143,6 +143,131 @@ args = ["-y", "pilotprotocol-mcp"]
 openclaw plugins inspect pilot-policy --runtime --json
 ```
 
+## Behind an HTTPS proxy (agent sandboxes)
+
+Hosted agent VMs such as Meta Muse block UDP, poison DNS for the Pilot
+hostnames, and only let traffic out through an authenticating `HTTPS_PROXY`
+that allows `CONNECT` to port 443. `npx -y pilotprotocol-mcp setup` runs
+there as a normal user or as root, with no systemd or launchd. It installs
+the runtime and the harness adapters through the proxy. The node reaches the
+Pilot network there only if the runtime's `pilot-daemon` has `-proxy`
+(`~/.pilot/bin/pilot-daemon -h` lists it). Released runtimes up to and
+including v1.13.10 do not have it; it arrives with
+pilot-protocol/pilotprotocol#470. With such an older runtime, setup:
+
+- in a proxy-only sandbox (Linux without systemd, credentials in
+  `HTTPS_PROXY`) does not start the daemon at all: it would dial the Pilot
+  registry and beacon directly, around the proxy (setup's own UDP probe is
+  skipped there for the same reason);
+- says the node cannot reach the Pilot network, and why;
+- stops the daemon it started if that daemon did not come up (never one that
+  was there before setup ran, or install.sh's launchd agent);
+- points at the
+  [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox),
+  which brings the node online today;
+- exits 1.
+
+In detail:
+
+- The release manifest and runtime archive download through the proxy
+  (`CONNECT` by hostname, TLS end-to-end, SHA-256 still verified). Proxy
+  selection is the same as `pilot-daemon -proxy` (common/netproxy v0.5.14):
+  the first usable one of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`,
+  `all_proxy` (plain `http://` uses `HTTP_PROXY`/`http_proxy` first), with
+  `NO_PROXY`/`no_proxy` honoured and localhost/loopback never proxied. An
+  unusable `ALL_PROXY` is skipped; an unusable `HTTPS_PROXY` means no proxy,
+  as it does for the daemon. Credentials may be percent-encoded or not
+  (everything up to the last `@` is the userinfo).
+- `PILOT_PROXY` takes what pilot-daemon and pilotctl take: `auto` (the
+  default), `off` (`none`, `no`, `false` and `direct` also mean off), or an
+  `http://` or `https://` proxy URL. Setup hands the daemon the same reading
+  (`off` for every alias). Any other value, such as `socks5://...` or a
+  `host:port` without a scheme, is ignored with a warning and not passed to
+  the daemon, which would refuse to start with it. A `"proxy"` key in
+  `~/.pilot/config.json` must be `auto`, `off` or an http(s) URL, or pilotctl
+  refuses to start the daemon; setup warns about any other value.
+- A `pilot-daemon` whose `-transport` accepts `auto` (`install.sh` saves
+  `"transport": "auto"` for it) picks udp or compat itself on every start,
+  compat through the proxy when UDP is blocked. Setup leaves that choice to
+  it: no `-transport`, nothing recorded in `~/.pilot/config.json`, and a
+  `"transport": "compat"` an earlier setup recorded is removed.
+- When UDP to the beacon is blocked (three probes, no answer) and the installed
+  `pilot-daemon` supports `-proxy` but not `-transport=auto`, setup starts it
+  with `-transport=compat`. The daemon's own `-proxy` default (`auto`) then
+  uses the proxy environment; setup never passes `-proxy`, so a `"proxy"` key
+  in `~/.pilot/config.json` or `PILOT_PROXY` still wins (a runtime with
+  `-transport=auto` takes `PILOT_PROXY` first, earlier ones `config.json`).
+  Setup records `"transport": "compat"` in `~/.pilot/config.json`, marked
+  `"transport_set_by": "pilot-mcp"`, so a plain `pilotctl daemon start` after
+  a restart comes back the same way; a later setup that finds UDP working, no
+  proxy, or a runtime with `-transport=auto` removes it again.
+- A `"transport"` you (or `install.sh`) set is never changed: `udp`, `compat`,
+  `auto`, or a value setup warns about. `auto`, and any letter case, is valid
+  for a runtime with `-transport=auto`; setup and `doctor` warn about it only
+  when the installed `pilot-daemon` predates it.
+- An older per-user runtime (`~/.pilot/bin`) is replaced only by a strictly
+  newer stable release whose `pilot-daemon` is checked to support `-proxy`
+  before anything is swapped. A managed node's pinned runtime, a runtime of
+  unknown version, and a runtime installed elsewhere are never replaced.
+  Otherwise setup keeps the runtime and points at the
+  [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox).
+  Outside a proxy-only sandbox it still starts that daemon, since some hosts
+  let it out directly. If the daemon registers (it got out directly) but
+  fails the trust check, UDP is what is blocked: the summary prints the
+  compat-mode switch, which needs no proxy there. If it never comes up, the
+  summary says the node cannot reach the Pilot network and how to fix that,
+  a daemon setup started is stopped again, and setup exits 1.
+- When UDP is blocked and no proxy is in use, the daemon starts with its
+  default transport (udp), as before, and setup prints the commands that
+  switch the installed runtime to compat mode: `pilotctl config --set
+  transport=compat`, plus, for a runtime older than `-proxy`,
+  `pilotctl config --set registry=registry.pilotprotocol.network:443`.
+- `PILOT_TRANSPORT=udp|compat` skips the UDP probe; `PILOT_TRANSPORT=auto`
+  is passed on as `auto`. Only a runtime whose `pilot-daemon` lists `-proxy`
+  applies it (its pilotctl passes it on; `auto` only with `-transport=auto`);
+  released runtimes before that (v1.13.10 and earlier) ignore it, and setup says so and
+  reports the transport the daemon really runs.
+- Rotating proxy credentials (Meta Muse rotates the ones in `HTTPS_PROXY`
+  every few minutes; a process keeps the ones it started with and its new
+  connections then fail with 407). The proxy command, `PILOT_PROXY_CMD` or
+  `"proxy_cmd"` in `~/.pilot/config.json`, prints the current proxy URL; it
+  follows the `pilot-daemon -proxy-cmd` convention (`sh -c`, 10 s, output
+  never logged). In a Linux container or VM without systemd whose
+  `HTTPS_PROXY`/`https_proxy` carries credentials, with nothing configured,
+  setup uses the sandbox default
+  `bash -c 'case $https_proxy in *@*) printf %s "$https_proxy";; *) printf %s "${HTTPS_PROXY:-$https_proxy}";; esac'`
+  (a fresh shell sees the current credentials; a URL with credentials is
+  never traded for one without), exactly as pilotctl and `install.sh` do.
+  - Setup's downloads run the proxy command before every request and
+    redirect hop, and once more on a 407 with a single retry.
+  - A `pilot-daemon` with `-proxy-cmd` gets the command. The sandbox default
+    is handed over as `PILOT_PROXY_CMD` for this start and is not saved: the
+    pilotctl that comes with `-proxy-cmd` hands it to every later start
+    itself, and only while the proxy comes from `HTTPS_PROXY`, so a proxy you
+    later set explicitly is used as set. A configured command is left for
+    the daemon to read.
+  - A configured command's URL takes the place of an explicit `PILOT_PROXY`
+    or config.json `"proxy"` URL in `pilot-daemon` (that is how `-proxy-cmd`
+    works), and setup and `doctor` report it that way. A `"proxy_cmd"` equal
+    to the sandbox default, which `install.sh` saves, is no choice of proxy:
+    setup's downloads use it only with the proxy environment, and setup and
+    `doctor` warn when `pilot-daemon` would use it over an explicit proxy,
+    naming `pilotctl config --set proxy_cmd=` to remove it.
+  - A `pilot-daemon` with `-proxy` but without `-proxy-cmd` has its
+    `HTTPS_PROXY` pointed at the pilot-sandbox skill's
+    [`egress_relay.py`](https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-sandbox/scripts/egress_relay.py)
+    on `127.0.0.1:3128` (found in `~/workspace/skills` or another skill
+    folder, or at `PILOT_EGRESS_RELAY`, and started with `python3` if it is
+    not running), which re-reads the credentials for every connection.
+    Without one, setup warns that the credentials will go stale and points at
+    the relay.
+- `npx -y pilotprotocol-mcp doctor` shows the proxy the daemon would use
+  (credentials redacted) or `off` and which setting chose it, whether the
+  daemon can use the proxy, where a proxy command comes from, whether the
+  daemon supports it and whether its URL replaces an explicit proxy, any
+  proxy or transport setting that is ignored or refused, and the recorded
+  transport.
+
 ## Privacy and optional management
 
 - All overlay traffic flows **P2P over encrypted UDP** (AES-256-GCM, X25519 key exchange, Ed25519 identity).

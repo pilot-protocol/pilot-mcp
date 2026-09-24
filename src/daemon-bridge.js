@@ -15,7 +15,7 @@
 
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +59,32 @@ export function pilotctlBinaryPath(env = process.env) {
   }
 
   throw new Error('pilotctl binary not found. Run `pilot-mcp setup` or install pilot-daemon first.');
+}
+
+// daemonBinaryPath mirrors pilotctl's companion lookup ($PILOT_DAEMON_BIN,
+// then the pilot-daemon beside the resolved pilotctl, then $PATH) so setup
+// inspects the same daemon `pilotctl daemon start` will launch. Returns null
+// when none is found.
+export function daemonBinaryPath(pilotctl, env = process.env) {
+  const explicit = String(env.PILOT_DAEMON_BIN ?? '').trim();
+  if (explicit) return explicit;
+  const name = process.platform === 'win32' ? 'pilot-daemon.exe' : 'pilot-daemon';
+  if (pilotctl) {
+    let self = pilotctl;
+    try {
+      self = realpathSync(pilotctl);
+    } catch {
+      // Fall back to the unresolved path, as pilotctl itself does.
+    }
+    const sibling = join(dirname(self), name);
+    if (existsSync(sibling)) return sibling;
+  }
+  for (const dir of (env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 export function daemonSocketPath() {
