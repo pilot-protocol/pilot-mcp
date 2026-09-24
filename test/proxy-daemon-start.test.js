@@ -14,10 +14,15 @@ import { promisify } from 'node:util';
 
 import { daemonBinaryPath } from '../src/daemon-bridge.js';
 import { findExecutable, proxyCommandFor, SANDBOX_PROXY_CMD } from '../src/netproxy.js';
-import { installDaemon, PILOT_SANDBOX_SKILL_URL, planDaemonStart } from '../src/setup/daemon.js';
+import { installDaemon as installDaemonOnHost, PILOT_SANDBOX_SKILL_URL, planDaemonStart } from '../src/setup/daemon.js';
 import { ensureEgressRelay, findEgressRelay } from '../src/setup/proxy-refresh.js';
 import { daemonFeatures, supportsEgressProxy } from '../src/setup/runtime.js';
 import { probeTransport } from '../src/setup/transport.js';
+
+// installDaemon, for a host that is not a proxy-only sandbox unless a test
+// says otherwise (`host`): whether the machine running the tests is one
+// (Linux without systemd) must not change what they check.
+const installDaemon = (options) => installDaemonOnHost({ host: NOT_SANDBOX, ...options });
 
 const PROXY = 'http://muse-agent:s3cr3t@proxy.muse.internal:3128';
 const REDACTED = 'http://***@proxy.muse.internal:3128';
@@ -233,7 +238,7 @@ test('behind a proxy, a daemon without -proxy that cannot get out is reported un
   assert.equal(fx.alive(), false);
   assert.ok(result.hint.includes(PILOT_SANDBOX_SKILL_URL), result.hint);
   assert.doesNotMatch(result.hint, /resolves|retry in 60s/);
-  assert.match(lines.join('\n'), /Stopped the pilot-daemon setup started: it did not come up/);
+  assert.match(lines.join('\n'), /Stopped the pilot-daemon setup started \(pid \d+\): it did not come up/);
   assert.doesNotMatch(lines.join('\n') + result.hint, /s3cr3t|muse-agent/);
 
   // A daemon that was already running is not setup's to stop.
@@ -246,13 +251,33 @@ test('behind a proxy, a daemon without -proxy that cannot get out is reported un
   assert.equal(fx.alive(), true);
   assert.equal(fx.calls().some((call) => call.args[1] === 'stop'), false);
 
-  // One that came up but fails the trust check is unreachable, and kept.
+  // One setup started that registered (it got out directly) but fails the
+  // trust check: UDP is what is blocked, and compat mode works without the
+  // proxy. Not "unreachable", not the pilot-sandbox skill, and kept
+  // (mcp-p3r2-unreachable-verdict-when-daemon-registered).
   fx = fixture(t, LEGACY_USAGE);
   writeFileSync(join(fx.work, 'daemon-dead'), '');
   result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: () => {}, upgradeRuntime: kept });
-  assert.equal(result.network_unreachable, true);
+  assert.equal(result.network_unreachable, undefined);
   assert.equal(result.daemon_stopped, undefined);
   assert.equal(fx.alive(), true);
+  assert.ok(result.compat_hint.some((line) => line.includes('pilotctl config --set transport=compat')), result.compat_hint);
+  assert.ok(result.compat_hint.some((line) => line.includes('pilotctl config --set registry=registry.pilotprotocol.network:443')), result.compat_hint);
+  assert.ok(!result.hint.includes(PILOT_SANDBOX_SKILL_URL), result.hint);
+
+  // A daemon started outside setup that is alive but still registering
+  // (it answers nothing yet): setup's start is refused, and setup never
+  // stops it or claims it started it (mcp-p3r2-stops-daemon-it-did-not-start).
+  fx = fixture(t, LEGACY_USAGE);
+  fx.markAliveUnanswering();
+  lines = [];
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: (line) => lines.push(line), upgradeRuntime: kept });
+  assert.equal(result.trust_verified, false);
+  assert.equal(result.daemon_stopped, undefined);
+  assert.equal(result.compat_hint, undefined);
+  assert.equal(fx.alive(), true);
+  assert.equal(fx.calls().some((call) => call.args[1] === 'stop'), false);
+  assert.doesNotMatch(lines.join('\n'), /Stopped the pilot-daemon setup started/);
 
   // Where the host lets it out directly, it works, and nothing is flagged.
   fx = fixture(t, LEGACY_USAGE);
@@ -272,7 +297,56 @@ test('behind a proxy, a daemon without -proxy that cannot get out is reported un
   assert.deepEqual(fx.calls().map((call) => call.args[1] ?? call.args[0]), ['start', 'list-agents']);
 });
 
-test('setup exits non-zero and names the way forward when the node cannot reach the network', { skip, timeout: 60_000 }, async (t) => {
+test('in a proxy-only sandbox a daemon without -proxy is not started at all', { skip }, async (t) => {
+  const kept = () => ({ upgraded: false, reason: 'the latest stable release v1.13.10 is not newer than the installed v1.13.10' });
+  let fx = fixture(t, LEGACY_USAGE);
+  writeFileSync(join(fx.work, 'daemon-dead'), ''); // no daemon answers the trust check
+  const lines = [];
+  let result = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: (line) => lines.push(line), upgradeRuntime: kept,
+  });
+  // It would dial the registry and beacon around the proxy (E2E scenario 7:
+  // 10 SYNs to 34.71.57.205:9000 and 4 UDP datagrams before setup stopped it).
+  assert.equal(fx.calls().some((call) => call.args[0] === 'daemon' && call.args[1] === 'start'), false, JSON.stringify(fx.calls()));
+  assert.equal(fx.calls().some((call) => call.args[1] === 'stop'), false);
+  assert.equal(result.network_unreachable, true);
+  assert.equal(result.daemon_not_started, true);
+  assert.equal(result.daemon_stopped, undefined);
+  assert.ok(result.hint.includes(PILOT_SANDBOX_SKILL_URL), result.hint);
+  assert.match(lines.join('\n'), /Not starting it: this host/);
+  assert.doesNotMatch(lines.join('\n') + result.hint, /s3cr3t|muse-agent/);
+
+  // A node already up there (the pilot-sandbox recipe's) is used as it is.
+  fx = fixture(t, LEGACY_USAGE);
+  fx.markRunning();
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: () => {}, upgradeRuntime: kept });
+  assert.equal(result.trust_verified, true);
+  assert.equal(result.network_unreachable, undefined);
+  assert.equal(fx.alive(), true);
+
+  // Without credentials in the proxy the host is not taken as proxy-only.
+  fx = fixture(t, LEGACY_USAGE);
+  fx.startFails();
+  result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: 'http://proxy.muse.internal:3128' }), home: fx.home, host: SANDBOX, log: () => {}, upgradeRuntime: kept });
+  assert.ok(startCall(fx), 'a proxy without credentials may not be the only way out');
+  assert.equal(result.daemon_stopped, true);
+});
+
+test('a launchd agent is never stopped by setup (stopping it unloads the agent)', { skip: skip || process.platform !== 'darwin' }, async (t) => {
+  const fx = fixture(t, LEGACY_USAGE);
+  mkdirSync(join(fx.home, 'Library', 'LaunchAgents'), { recursive: true });
+  writeFileSync(join(fx.home, 'Library', 'LaunchAgents', 'network.pilotprotocol.pilot-daemon.plist'), '<plist/>');
+  fx.startFails();
+  const result = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, log: () => {},
+    upgradeRuntime: () => ({ upgraded: false, reason: 'test' }),
+  });
+  assert.equal(result.network_unreachable, true);
+  assert.equal(result.daemon_stopped, undefined);
+  assert.equal(fx.calls().some((call) => call.args[1] === 'stop'), false);
+});
+
+test('setup exits non-zero and names the way forward when the node cannot reach the network', { skip: skip || (process.platform === 'linux' && !existsSync('/run/systemd/system')), timeout: 60_000 }, async (t) => {
   const cli = new URL('../cli.js', import.meta.url).pathname;
   const setup = (fx) => new Promise((resolve) => {
     execFile(process.execPath, [cli, 'setup'], {
@@ -289,6 +363,7 @@ test('setup exits non-zero and names the way forward when the node cannot reach 
   assert.equal(run.code, 1, run.output);
   assert.match(run.output, /THIS NODE CANNOT REACH THE PILOT NETWORK/);
   assert.match(run.output, /the egress proxy http:\/\/\*\*\*@proxy\.muse\.internal:3128, but the\ninstalled pilot-daemon has no -proxy flag/);
+  assert.match(run.output, /It could not get out without the proxy either\./);
   assert.match(run.output, /This will not resolve by waiting or re-running doctor\./);
   assert.match(run.output, /Setup stopped the pilot-daemon it started\./);
   assert.ok(run.output.includes(`now: follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`), run.output);
@@ -1006,6 +1081,7 @@ test('without -proxy-cmd and without a usable relay, setup says the credentials 
   });
   assert.equal(legacyResult.proxy_refresh, undefined);
   assert.match(legacyLines.join('\n'), /has no -proxy flag/);
+  assert.equal(startCall(legacy), undefined, 'a proxy-only sandbox never starts a daemon without -proxy');
 });
 
 test('the egress relay is started once, reused while it runs, and a port held by another program is never used', { skip, timeout: 20_000 }, async (t) => {
@@ -1304,6 +1380,9 @@ function fixture(t, usage) {
   const up = join(work, 'daemon-up');
   const spawned = join(work, 'daemon-spawned');
   const startFails = join(work, 'start-fails');
+  // pilotctl's pid file: a live pid (this test process) while a daemon it
+  // started runs, answering or not.
+  const pidFile = join(home, '.pilot', 'pilot.pid');
   writeFileSync(pilotctl, `#!/bin/sh
 {
   printf 'ARGS'; for arg in "$@"; do printf '\\t%s' "$arg"; done; printf '\\n'
@@ -1317,13 +1396,14 @@ if [ "$1 $2" = "daemon start" ]; then
   esac
   case "\${PILOT_PROXY-}" in ''|auto|off|http://?*|https://?*) ;; *) echo "-proxy: invalid proxy" >&2; : > '${dead}'; exit 1 ;; esac
   if [ -e '${up}' ]; then echo "daemon is already running" >&2; exit 1; fi
-  if [ -e '${startFails}' ]; then echo "error: daemon started (pid 4958) but did not become ready within 15s" >&2; : > '${dead}'; : > '${spawned}'; exit 1; fi
-  : > '${up}'
+  if [ -s '${pidFile}' ] && kill -0 "$(cat '${pidFile}')" 2>/dev/null; then echo "error: daemon is already running (pid $(cat '${pidFile}'))" >&2; exit 1; fi
+  if [ -e '${startFails}' ]; then echo "error: daemon started (pid ${process.pid}) but did not become ready within 15s" >&2; : > '${dead}'; : > '${spawned}'; echo ${process.pid} > '${pidFile}'; exit 1; fi
+  : > '${up}'; echo ${process.pid} > '${pidFile}'
 fi
 if [ "$1 $2" = "daemon status" ]; then [ -e '${up}' ] && exit 0; exit 1; fi
 if [ "$1 $2" = "daemon stop" ]; then
-  [ -e '${up}' ] || [ -e '${spawned}' ] || { echo "daemon is not running" >&2; exit 1; }
-  rm -f '${up}' '${spawned}'
+  [ -e '${up}' ] || [ -e '${spawned}' ] || [ -s '${pidFile}' ] || { echo "daemon is not running" >&2; exit 1; }
+  rm -f '${up}' '${spawned}' '${pidFile}'
 fi
 if [ "$1" = send-message ]; then
   if [ -e '${dead}' ]; then printf '%s\\n' '{"ok":false}'; exit 1; fi
@@ -1351,7 +1431,10 @@ exit 0
     writeDaemon,
     startFails: () => writeFileSync(startFails, ''),
     markRunning: () => writeFileSync(up, ''),
-    alive: () => existsSync(up) || existsSync(spawned),
+    // A daemon started outside setup that is alive but not answering yet
+    // (still registering): only its pid file shows it.
+    markAliveUnanswering: () => { writeFileSync(pidFile, `${process.pid}\n`); writeFileSync(dead, ''); },
+    alive: () => existsSync(up) || existsSync(spawned) || existsSync(pidFile),
     env: (extra) => ({ PILOTCTL_BIN: pilotctl, PATH: '/usr/bin:/bin', ...extra }),
     calls: () => {
       let text = '';

@@ -9,14 +9,26 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 ### Fixed
 - `setup` runs in proxy-only agent sandboxes such as Meta Muse, as a normal
   user or as root and without systemd. The node reaches the Pilot network
-  there only with a runtime whose `pilot-daemon` has `-proxy`; v1.13.9 and
-  v1.13.10-rc.1 do not, and it arrives with pilot-protocol/pilotprotocol#470.
-  With an older runtime the summary no longer says that trust usually
-  resolves within 60s. Instead it:
+  there only with a runtime whose `pilot-daemon` has `-proxy`; released
+  runtimes up to and including v1.13.10 do not, and it arrives with
+  pilot-protocol/pilotprotocol#470. With an older runtime the summary no
+  longer says that trust usually resolves within 60s. Instead it:
+  - in a proxy-only sandbox (Linux without systemd, credentials in
+    `HTTPS_PROXY`), does not start that daemon, which would dial the
+    registry and beacon around the proxy, and skips its own UDP probe;
   - says the node cannot reach the Pilot network and why;
-  - stops the daemon setup started if it never came up;
+  - stops the daemon setup started if it never came up, and only that one
+    (not one alive before setup ran, answering or still registering, and
+    never install.sh's launchd agent);
   - points at the pilot-sandbox skill;
   - exits 1.
+  Where that daemon registers directly but fails the trust check (UDP
+  blocked, TCP allowed), setup no longer calls the network unreachable: it
+  prints the compat-mode switch, which needs no proxy there.
+- The sandbox proxy command is the one pilotctl and install.sh use and save
+  (`bash -c 'case $https_proxy in *@*) ...'`), so a `proxy_cmd` install.sh
+  saved is recognized as the sandbox default (the earlier pre-release
+  command too).
 
   The runtime manifest and archive downloads honour the proxy environment
   (Node's built-in fetch ignores it), tunnelling with `CONNECT` by hostname
@@ -69,8 +81,8 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
   transport. `PILOT_TRANSPORT` is passed on lower-cased, or not at all when it
   is not `udp`, `compat` or `auto` (or is `auto` for a runtime that refuses it).
 - `PILOT_TRANSPORT=udp|compat` skips the UDP probe and is applied only by a
-  runtime whose daemon has `-proxy`; with an older runtime (v1.13.9, which
-  ignores it) setup says so and the summary reports the transport the daemon
+  runtime whose daemon has `-proxy`; with an older runtime (v1.13.10 and earlier, which
+  ignore it) setup says so and the summary reports the transport the daemon
   really runs. When compat mode is needed without a proxy, setup prints the
   `pilotctl config` commands that switch the installed runtime to it.
 - Rotating proxy credentials (Meta Muse rotates them every few minutes). The

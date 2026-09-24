@@ -40,19 +40,30 @@
 // proxy command (-proxy-cmd) or the pilot-sandbox egress relay; see
 // proxy-refresh.js.
 //
-// A daemon without -proxy cannot use the proxy at all. Behind a proxy with
-// UDP blocked (every released runtime up to v1.13.9 and v1.13.10-rc.1),
-// setup still starts it, since some hosts let it out directly, but when it
-// neither comes up nor answers the trust check the result says the network
-// is unreachable (`network_unreachable`), and a daemon setup itself started
-// is stopped again (`daemon_stopped`) instead of being left to retry direct
-// registry dials (v1.13.9 gives up after 10 attempts, about 50s) that a
-// proxy-only sandbox refuses.
+// A daemon without -proxy cannot use the proxy at all (every released
+// runtime up to and including v1.13.10: its `pilot-daemon -h` lists no
+// -proxy). Behind a proxy with UDP blocked:
+//   - in a proxy-only sandbox (proxyOnlySandbox: Linux without systemd,
+//     credentials in the proxy environment, as Meta Muse runs agents) setup
+//     does not start it: it would dial the registry and beacon directly,
+//     around the proxy. The result says the network is unreachable
+//     (`network_unreachable`, `daemon_not_started`);
+//   - elsewhere setup starts it, since some hosts let it out directly. If it
+//     registers (the start succeeds) but fails the trust check, UDP is what
+//     is blocked, and the result carries the compat-mode switch that works
+//     without the proxy (`compat_hint`). If it never comes up, the network is
+//     unreachable, and a daemon setup itself started is stopped again
+//     (`daemon_stopped`) instead of being left to retry direct registry dials
+//     (v1.13.9 gives up after 10 attempts, about 50s). A daemon that was
+//     there before setup ran (answering, or alive by its pid file, or a
+//     launchd agent pilotctl would unload) is never stopped.
 
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import process from 'node:process';
 import { daemonBinaryPath, execPilotctl, pilotctlBinaryPath, pilotctlJSON } from '../daemon-bridge.js';
-import { daemonProxySetting, inspectProxy, parseProxySetting, redactProxyURL } from '../netproxy.js';
+import { daemonProxySetting, inspectProxy, parseProxySetting, proxyOnlySandbox, redactProxyURL, sandboxHost } from '../netproxy.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport, writePilotConfig } from './pilot-config.js';
 import { planProxyRefresh } from './proxy-refresh.js';
 import { daemonFeatures, managedNodeReason, upgradeRuntimeForProxy } from './runtime.js';
@@ -93,7 +104,8 @@ export async function installDaemon({
   let plan = { mode: 'default', transport, transportSource: 'probe', warnings: [] };
   let refresh = { mode: 'none', env: {}, lines: [] };
   let started = null;
-  let runningBefore = null;
+  let before = null;
+  let skipStart = false;
   if (autoStart) {
     if (enterpriseControl) {
       const status = await execPilotctl(['daemon', 'status', '--check'], { capture: true });
@@ -144,18 +156,25 @@ export async function installDaemon({
       log('  has no -proxy flag, so it cannot reach the Pilot registry through the proxy.');
       log(`  Update the Pilot runtime, or follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`);
       // Known before the start, so that only a daemon setup started itself
-      // is stopped again if it cannot come up.
-      runningBefore = (await execPilotctl(['daemon', 'status', '--check'], { capture: true })).code === 0;
+      // is ever stopped again.
+      before = await daemonPresence(home);
+      if (!before.running && proxyOnlySandbox(env, host ?? sandboxHost(env))) {
+        skipStart = true;
+        log('  Not starting it: this host (Linux without systemd, credentials in its proxy) goes out only');
+        log('  through the proxy, and this pilot-daemon would dial the Pilot registry and beacon directly.');
+      }
     } else {
       for (const line of plan.compatHint ?? []) log(`  ${line}`);
     }
     for (const line of refresh.lines) log(`  ${line}`);
     if (enterpriseControl) startArgs.push('--enterprise-control', enterpriseControl);
-    started = await execPilotctl(startArgs, {
-      capture: Boolean(enterpriseControl),
-      env: { ...daemonEnvironment(env, plan.runtime), ...refresh.env },
-    });
-    if (enterpriseControl && started.code !== 0) {
+    if (!skipStart) {
+      started = await execPilotctl(startArgs, {
+        capture: Boolean(enterpriseControl),
+        env: { ...daemonEnvironment(env, plan.runtime), ...refresh.env },
+      });
+    }
+    if (enterpriseControl && exitCode(started) !== 0) {
       throw new Error(`managed daemon start failed: ${String(started.stderr || started.stdout).trim()}`);
     }
   }
@@ -175,16 +194,30 @@ export async function installDaemon({
   // UDP-blocked transports, and stale daemons themselves.
   const outcome = { ...(await trustCheck()), ...egressSummary(plan, refresh) };
   if (plan.mode === 'proxy-unsupported' && !outcome.trust_verified) {
+    // Setup's own start registered the daemon: it got out directly, around
+    // the proxy (pilotctl's start blocks until registration), and it is UDP
+    // that is blocked. Compat mode needs no proxy on such a host.
+    const ownStart = before && !before.running;
+    if (ownStart && exitCode(started) === 0) {
+      outcome.compat_hint = directCompatHint(plan.runtime().proxy, readPilotConfig(home).config ?? {});
+      outcome.hint = `pilot-daemon registered directly (it cannot use the egress proxy) but cannot reach peers: UDP is blocked. ${outcome.compat_hint.join(' ')}`;
+      return outcome;
+    }
     // The daemon cannot use the proxy and did not get out without it: this
     // does not resolve by waiting, only with a runtime that has -proxy or
     // the pilot-sandbox skill.
     outcome.network_unreachable = true;
+    if (skipStart) outcome.daemon_not_started = true;
     outcome.hint = `pilot-daemon has no -proxy flag and could not reach the Pilot network from this host without the egress proxy. Follow the pilot-sandbox skill (${PILOT_SANDBOX_SKILL_URL}), or re-run setup once a Pilot runtime whose pilot-daemon has -proxy is released.`;
-    if (runningBefore === false && started && started.code !== 0) {
+    // Only a daemon this start created: its pid file appeared, and nothing
+    // was there before (an answering daemon, a live pid, a launchd agent,
+    // which `daemon stop` would unload for good).
+    const pid = ownStart && started ? livePid(home) : null;
+    if (pid !== null && !before.launchd) {
       const stopped = await execPilotctl(['daemon', 'stop'], { capture: true });
       if (stopped.code === 0) {
         outcome.daemon_stopped = true;
-        log('  Stopped the pilot-daemon setup started: it did not come up, and without -proxy it can only dial');
+        log(`  Stopped the pilot-daemon setup started (pid ${pid}): it did not come up, and without -proxy it can only dial`);
         log('  the Pilot registry directly, which does not work from this host.');
       } else {
         const reason = String(stopped.stderr || stopped.stdout).trim().split('\n')[0].slice(0, 200);
@@ -193,6 +226,58 @@ export async function installDaemon({
     }
   }
   return outcome;
+}
+
+// exitCode is a pilotctl run's exit status: execPilotctl resolves the bare
+// code when the output is not captured, { code, stdout, stderr } when it is.
+function exitCode(result) {
+  return typeof result === 'number' ? result : result?.code;
+}
+
+// daemonPresence says whether a pilot-daemon is already there before setup
+// starts one, the ways `pilotctl daemon start` itself refuses to start a
+// second: it answers (`daemon status --check`), its pid file names a live
+// process (a daemon still registering answers nothing yet), or, on macOS,
+// install.sh's launchd agent exists (pilotctl starts and stops the daemon
+// through it, and stopping it unloads the agent). `launchd` is reported on
+// its own: such a daemon is never setup's to stop.
+async function daemonPresence(home) {
+  const answering = (await execPilotctl(['daemon', 'status', '--check'], { capture: true })).code === 0;
+  const launchd = process.platform === 'darwin'
+    && existsSync(join(home, 'Library', 'LaunchAgents', 'network.pilotprotocol.pilot-daemon.plist'));
+  return { running: answering || livePid(home) !== null || launchd, launchd };
+}
+
+// livePid is the pid in pilotctl's pid file (~/.pilot/pilot.pid) when that
+// process is alive, else null.
+export function livePid(home = homedir()) {
+  let pid;
+  try {
+    pid = Number.parseInt(readFileSync(join(home, '.pilot', 'pilot.pid'), 'utf8').trim(), 10);
+  } catch {
+    return null;
+  }
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch (error) {
+    return error.code === 'EPERM' ? pid : null;
+  }
+}
+
+// directCompatHint: a daemon without -proxy registered directly, so this
+// host lets TCP out without the proxy, and compat mode (WSS over TCP/443)
+// needs nothing else. `current` is whether the runtime's pilotctl applies
+// the transport itself (it has -proxy); older ones hand config.json's
+// registry to the daemon, which must then name the TLS registry.
+function directCompatHint(current, config) {
+  const lines = ['Switch it to compat mode (WSS over TCP/443), which works here without the proxy: `pilotctl config --set transport=compat`'];
+  if (!current && String(config.registry ?? DEFAULT_REGISTRY).trim() === DEFAULT_REGISTRY) {
+    lines.push(`and \`pilotctl config --set registry=${COMPAT_REGISTRY}\``);
+  }
+  lines.push('then restart the daemon: `pilotctl daemon stop && pilotctl daemon start`.');
+  return lines;
 }
 
 // trustCheck is setup's smoke test: a 1-item search to list-agents, which

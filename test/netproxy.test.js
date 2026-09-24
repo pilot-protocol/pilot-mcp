@@ -24,6 +24,9 @@ import {
   proxyHasCredentials,
   redactProxyURL,
   resolveProxy,
+  isSavedSandboxDefault,
+  LEGACY_SANDBOX_PROXY_CMDS,
+  proxyOnlySandbox,
   runProxyCommand,
   SANDBOX_PROXY_CMD,
 } from '../src/netproxy.js';
@@ -768,8 +771,19 @@ test('setup\'s proxy command: the configured one, else the sandbox default where
   assert.deepEqual(proxyCommandFor({}, { proxy_cmd: 'cat /y' }, { sandbox: false, bash: false }), { command: 'cat /y', source: 'config.json proxy_cmd' });
   assert.deepEqual(proxyCommandFor({ HTTPS_PROXY: creds }, {}, sandbox), { command: SANDBOX_PROXY_CMD, source: 'sandbox default' });
   assert.deepEqual(proxyCommandFor({ https_proxy: creds }, { proxy_cmd: '  ' }, sandbox), { command: SANDBOX_PROXY_CMD, source: 'sandbox default' });
-  // The command pilotctl and install.sh use, byte for byte.
-  assert.equal(SANDBOX_PROXY_CMD, 'bash -c \'printf %s "${https_proxy:-$HTTPS_PROXY}"\'');
+  // The command pilotctl (sandboxProxyCmd) and install.sh (release#49
+  // SANDBOX_PROXY_CMD) use, byte for byte: install.sh saves it as
+  // config.json "proxy_cmd", and isSavedSandboxDefault must recognize it.
+  assert.equal(SANDBOX_PROXY_CMD, 'bash -c \'case $https_proxy in *@*) printf %s "$https_proxy";; *) printf %s "${HTTPS_PROXY:-$https_proxy}";; esac\'');
+  assert.equal(isSavedSandboxDefault({ command: SANDBOX_PROXY_CMD, source: 'config.json proxy_cmd' }), true);
+  for (const legacy of LEGACY_SANDBOX_PROXY_CMDS) {
+    assert.equal(isSavedSandboxDefault({ command: legacy, source: 'config.json proxy_cmd' }), true, legacy);
+  }
+  assert.equal(isSavedSandboxDefault({ command: SANDBOX_PROXY_CMD, source: 'PILOT_PROXY_CMD' }), false);
+  assert.equal(isSavedSandboxDefault({ command: 'cat /run/proxy', source: 'config.json proxy_cmd' }), false);
+  // release#49 review (R49-A3): with an explicit PILOT_PROXY, the proxy_cmd
+  // install.sh saved stands in for the environment only and is not used.
+  assert.equal(proxyCommandFor({ PILOT_PROXY: 'http://relay.local:3128', HTTPS_PROXY: creds }, { proxy_cmd: SANDBOX_PROXY_CMD }, sandbox), null);
   for (const [label, env, host] of [
     ['not a sandbox', { HTTPS_PROXY: creds }, { sandbox: false, bash: true }],
     ['no bash', { HTTPS_PROXY: creds }, { sandbox: true, bash: false }],
@@ -1071,3 +1085,14 @@ function runRuntimeInstall(env, entry, options = {}) {
     });
   });
 }
+
+test('a proxy-only sandbox is Linux without systemd with credentials in HTTPS_PROXY or https_proxy', () => {
+  const creds = 'http://muse-agent:s3cr3t@proxy:3128';
+  const sandbox = { sandbox: true, bash: false };
+  assert.equal(proxyOnlySandbox({ HTTPS_PROXY: creds }, sandbox), true);
+  assert.equal(proxyOnlySandbox({ https_proxy: creds }, sandbox), true);
+  assert.equal(proxyOnlySandbox({ HTTPS_PROXY: creds }, { sandbox: false, bash: true }), false);
+  assert.equal(proxyOnlySandbox({ HTTPS_PROXY: 'http://proxy:3128' }, sandbox), false);
+  assert.equal(proxyOnlySandbox({ ALL_PROXY: creds }, sandbox), false);
+  assert.equal(proxyOnlySandbox({}, sandbox), false);
+});

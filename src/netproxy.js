@@ -216,9 +216,20 @@ function pickProxy(url, settings, fixed) {
 }
 
 // SANDBOX_PROXY_CMD is the proxy command for hosted agent sandboxes: a fresh
-// bash sees the sandbox's current proxy URL. pilotctl (daemon start) and
-// install.sh use the same command.
-export const SANDBOX_PROXY_CMD = `bash -c 'printf %s "\${https_proxy:-$HTTPS_PROXY}"'`;
+// bash sees the sandbox's current proxy URL. It prints whichever of
+// $https_proxy and $HTTPS_PROXY carries credentials ($https_proxy when both
+// do), else ${HTTPS_PROXY:-$https_proxy}, so a URL with credentials is never
+// traded for one without. pilotctl (daemon start, sandboxProxyCmd) and
+// install.sh (pilot-protocol/release#49, SANDBOX_PROXY_CMD) use exactly this
+// command; install.sh saves it as config.json "proxy_cmd".
+export const SANDBOX_PROXY_CMD = `bash -c 'case $https_proxy in *@*) printf %s "$https_proxy";; *) printf %s "\${HTTPS_PROXY:-$https_proxy}";; esac'`;
+
+// LEGACY_SANDBOX_PROXY_CMDS are sandbox defaults earlier pre-release
+// installers saved as "proxy_cmd"; they are recognized as the sandbox
+// default too (see isSavedSandboxDefault).
+export const LEGACY_SANDBOX_PROXY_CMDS = Object.freeze([
+  `bash -c 'printf %s "\${https_proxy:-$HTTPS_PROXY}"'`,
+]);
 
 // configuredProxyCommand is the proxy command the user configured, in the
 // order pilot-daemon reads it: $PILOT_PROXY_CMD, then config.json
@@ -271,7 +282,18 @@ export function proxyCommandFor(env = process.env, config = {}, host = sandboxHo
 // environment's proxy, so it is no choice of proxy; pilot-daemon still runs
 // it in place of an explicit proxy URL, which setup and doctor warn about.
 export function isSavedSandboxDefault(configured) {
-  return configured?.source === 'config.json proxy_cmd' && configured.command === SANDBOX_PROXY_CMD;
+  if (configured?.source !== 'config.json proxy_cmd') return false;
+  return configured.command === SANDBOX_PROXY_CMD || LEGACY_SANDBOX_PROXY_CMDS.includes(configured.command);
+}
+
+// proxyOnlySandbox: a hosted agent sandbox whose only way out is its proxy —
+// Linux without systemd (sandboxHost) with credentials in HTTPS_PROXY or
+// https_proxy, as Meta Muse runs agents. Direct traffic there (a UDP probe,
+// a daemon without -proxy dialing the registry) goes around the proxy,
+// which such sandboxes drop or punish.
+export function proxyOnlySandbox(env = process.env, host = sandboxHost(env)) {
+  if (!host.sandbox) return false;
+  return ['HTTPS_PROXY', 'https_proxy'].some((name) => proxyHasCredentials(env[name]));
 }
 
 // The proxy environment variables the daemon's proxy can come from. A proxy

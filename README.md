@@ -151,12 +151,17 @@ that allows `CONNECT` to port 443. `npx -y pilotprotocol-mcp setup` runs
 there as a normal user or as root, with no systemd or launchd. It installs
 the runtime and the harness adapters through the proxy. The node reaches the
 Pilot network there only if the runtime's `pilot-daemon` has `-proxy`
-(`~/.pilot/bin/pilot-daemon -h` lists it). v1.13.9 and v1.13.10-rc.1 do not
-have it; it arrives with pilot-protocol/pilotprotocol#470. With such an
-older runtime, setup:
+(`~/.pilot/bin/pilot-daemon -h` lists it). Released runtimes up to and
+including v1.13.10 do not have it; it arrives with
+pilot-protocol/pilotprotocol#470. With such an older runtime, setup:
 
+- in a proxy-only sandbox (Linux without systemd, credentials in
+  `HTTPS_PROXY`) does not start the daemon at all: it would dial the Pilot
+  registry and beacon directly, around the proxy (setup's own UDP probe is
+  skipped there for the same reason);
 - says the node cannot reach the Pilot network, and why;
-- stops the daemon it started if that daemon did not come up;
+- stops the daemon it started if that daemon did not come up (never one that
+  was there before setup ran, or install.sh's launchd agent);
 - points at the
   [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox),
   which brings the node online today;
@@ -206,11 +211,12 @@ In detail:
   unknown version, and a runtime installed elsewhere are never replaced.
   Otherwise setup keeps the runtime and points at the
   [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox).
-  It still starts that daemon, since some hosts let it out directly. If the
-  daemon then fails the trust check, the summary does not say trust will
-  resolve by itself. It says the node cannot reach the Pilot network and
-  how to fix that. A daemon setup started that never came up is stopped
-  again, and setup exits 1.
+  Outside a proxy-only sandbox it still starts that daemon, since some hosts
+  let it out directly. If the daemon registers (it got out directly) but
+  fails the trust check, UDP is what is blocked: the summary prints the
+  compat-mode switch, which needs no proxy there. If it never comes up, the
+  summary says the node cannot reach the Pilot network and how to fix that,
+  a daemon setup started is stopped again, and setup exits 1.
 - When UDP is blocked and no proxy is in use, the daemon starts with its
   default transport (udp), as before, and setup prints the commands that
   switch the installed runtime to compat mode: `pilotctl config --set
@@ -219,7 +225,7 @@ In detail:
 - `PILOT_TRANSPORT=udp|compat` skips the UDP probe; `PILOT_TRANSPORT=auto`
   is passed on as `auto`. Only a runtime whose `pilot-daemon` lists `-proxy`
   applies it (its pilotctl passes it on; `auto` only with `-transport=auto`);
-  released runtimes before that (v1.13.9) ignore it, and setup says so and
+  released runtimes before that (v1.13.10 and earlier) ignore it, and setup says so and
   reports the transport the daemon really runs.
 - Rotating proxy credentials (Meta Muse rotates the ones in `HTTPS_PROXY`
   every few minutes; a process keeps the ones it started with and its new
@@ -228,9 +234,10 @@ In detail:
   follows the `pilot-daemon -proxy-cmd` convention (`sh -c`, 10 s, output
   never logged). In a Linux container or VM without systemd whose
   `HTTPS_PROXY`/`https_proxy` carries credentials, with nothing configured,
-  setup uses the sandbox default `bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'`
-  (a fresh shell sees the current credentials), as pilotctl and `install.sh`
-  do.
+  setup uses the sandbox default
+  `bash -c 'case $https_proxy in *@*) printf %s "$https_proxy";; *) printf %s "${HTTPS_PROXY:-$https_proxy}";; esac'`
+  (a fresh shell sees the current credentials; a URL with credentials is
+  never traded for one without), exactly as pilotctl and `install.sh` do.
   - Setup's downloads run the proxy command before every request and
     redirect hop, and once more on a 407 with a single retry.
   - A `pilot-daemon` with `-proxy-cmd` gets the command. The sandbox default

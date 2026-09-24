@@ -24,7 +24,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execPilotctl } from '../daemon-bridge.js';
-import { inspectProxy, proxyCommandFor } from '../netproxy.js';
+import { inspectProxy, proxyCommandFor, proxyOnlySandbox } from '../netproxy.js';
 import { readPilotConfig } from './pilot-config.js';
 import { ensurePilotRuntime } from './runtime.js';
 import { detectHarnesses } from './detect.js';
@@ -60,9 +60,15 @@ export async function runSetup(flags) {
   });
 
 	await step(opts.managedURL ? '4' : '3', 'Transport', async () => {
-    opts.transport = await probeTransport();
-    if (opts.transport === 'compat') {
-      log(String(process.env.PILOT_TRANSPORT ?? '').trim().toLowerCase() === 'compat'
+    const forced = String(process.env.PILOT_TRANSPORT ?? '').trim().toLowerCase();
+    // In a proxy-only sandbox the probe's datagrams would go around the
+    // proxy: UDP is taken as blocked without sending any.
+    const proxyOnly = forced !== 'udp' && forced !== 'compat' && proxyOnlySandbox(process.env);
+    opts.transport = proxyOnly ? 'compat' : await probeTransport();
+    if (proxyOnly) {
+      log('  Proxy-only sandbox (Linux without systemd, credentials in HTTPS_PROXY): UDP probe skipped, UDP taken as blocked.');
+    } else if (opts.transport === 'compat') {
+      log(forced === 'compat'
         ? '  PILOT_TRANSPORT=compat: UDP probe skipped.'
         : '  UDP to the beacon appears blocked (no reply to 3 probes).');
     }
@@ -80,6 +86,8 @@ export async function runSetup(flags) {
       opts.proxy_replaced_by = daemon.proxy_replaced_by;
       opts.network_unreachable = daemon.network_unreachable === true;
       opts.daemon_stopped = daemon.daemon_stopped === true;
+      opts.daemon_not_started = daemon.daemon_not_started === true;
+      opts.compat_hint = daemon.compat_hint;
     } catch (error) {
       // Harness attachment remains useful and is safe in unmanaged pass-through
       // mode. Do not abort before writing adapters merely because the separate
@@ -127,8 +135,14 @@ export async function runSetup(flags) {
   if (opts.network_unreachable) {
     log('Harness adapters installed — THIS NODE CANNOT REACH THE PILOT NETWORK.');
     log(`UDP is blocked and the way out is the egress proxy ${opts.proxy}, but the`);
-    log('installed pilot-daemon has no -proxy flag, so it cannot use that proxy, and it');
-    log('could not get out without it. This will not resolve by waiting or re-running doctor.');
+    log('installed pilot-daemon has no -proxy flag, so it cannot use that proxy.');
+    if (opts.daemon_not_started) {
+      log('On this host (Linux without systemd, credentials in the proxy) the proxy is the only way');
+      log('out, so setup did not start it: it would dial the Pilot registry directly, around the proxy.');
+    } else {
+      log('It could not get out without the proxy either.');
+    }
+    log('This will not resolve by waiting or re-running doctor.');
     if (opts.daemon_stopped) log('Setup stopped the pilot-daemon it started.');
     log('To bring this node online:');
     log(`  - now: follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`);
@@ -139,6 +153,10 @@ export async function runSetup(flags) {
       log('Harness adapters installed — PROTOCOL RUNTIME NOT AVAILABLE.');
       log('Unmanaged agents continue normally; managed control is not active.');
       log(`Runtime error: ${opts.daemon_error}`);
+    } else if (opts.compat_hint?.length) {
+      log('Pilot installed — the daemon registered, but it cannot reach peers yet.');
+      log('It cannot use the egress proxy (no -proxy flag) and went out directly, where UDP is blocked.');
+      for (const line of opts.compat_hint) log(line);
     } else {
       log('Pilot installed — TRUST NOT YET VERIFIED.');
       log('Daemon is up but the smoke handshake with list-agents did not complete.');
@@ -150,7 +168,7 @@ export async function runSetup(flags) {
   }
   log('');
   log(`  Address:   ${opts.address ?? (opts.network_unreachable ? '(none: not on the network)' : '(fetching…)')}`);
-  log(`  Hostname:  ${opts.hostname}`);
+  log(`  Hostname:  ${opts.hostname ?? '(not set)'}`);
   log(`  Transport: ${opts.transport}`);
   if (opts.proxy) log(`  Proxy:     ${opts.proxy}${proxyNote(opts)}`);
   if (opts.proxy_refresh) log(`  Proxy credentials: ${PROXY_REFRESH_SUMMARY[opts.proxy_refresh] ?? opts.proxy_refresh}`);
