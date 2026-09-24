@@ -4,10 +4,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { daemonBinaryPath, daemonHealthy, pilotctlBinaryPath } from './daemon-bridge.js';
-import { redactProxyURL } from './netproxy.js';
+import { configuredProxyCommand, redactProxyURL } from './netproxy.js';
 import { daemonProxyView, daemonSettingWarnings, PILOT_SANDBOX_SKILL_URL } from './setup/daemon.js';
 import { detectHarnesses } from './setup/detect.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport } from './setup/pilot-config.js';
+import { EGRESS_RELAY_URL } from './setup/proxy-refresh.js';
 import { daemonFeatures } from './setup/runtime.js';
 import { VERSION } from './version.js';
 
@@ -34,6 +35,9 @@ export async function runDoctor(flags = {}, options = {}) {
     } else if (report.network.mode === 'off') {
       write(`Egress proxy: off (${report.network.setting})`);
     }
+    if (report.network.proxy_cmd?.daemon_support) {
+      write(`Proxy credentials: re-read by pilot-daemon with the proxy command from ${report.network.proxy_cmd.source}`);
+    }
     for (const warning of report.network.warnings ?? []) write(`Egress proxy warning: ${warning}`);
     if (report.network.transport) {
       write(`Transport: ${report.network.transport.value} (config.json, set by ${report.network.transport.set_by === SETUP_OWNER ? 'pilot-mcp setup' : 'you or install.sh'})`);
@@ -56,8 +60,9 @@ function runtimeCheck() {
 // networkCheck reports the egress proxy the daemon would use (redacted) and
 // the mode behind it, whether the daemon pilotctl would launch supports it,
 // any proxy or transport setting that is ignored or refused (judged against
-// that daemon: "auto" is valid for one with -transport=auto), and the
-// transport recorded in ~/.pilot/config.json.
+// that daemon: "auto" is valid for one with -transport=auto), the proxy
+// command that re-reads rotating credentials (never the command itself), and
+// the transport recorded in ~/.pilot/config.json.
 function networkCheck(env, home) {
   const { path, config } = readPilotConfig(home);
   let features;
@@ -81,6 +86,13 @@ function networkCheck(env, home) {
   if (view.setting) report.setting = view.setting;
   if (proxy) {
     Object.assign(report, { proxy: redactProxyURL(proxy.url), source: proxy.source, daemon_proxy_support: runtime().proxy });
+  }
+  const command = configuredProxyCommand(env, config ?? {});
+  if (command) {
+    report.proxy_cmd = { source: command.source, daemon_support: runtime().proxyCmd };
+    if (runtime().known && !runtime().proxyCmd) {
+      warnings.push(`${command.source} is set, but the installed pilot-daemon predates -proxy-cmd and ignores it, so rotated proxy credentials are not re-read. Update the Pilot runtime, or use the pilot-sandbox egress relay (${EGRESS_RELAY_URL}).`);
+    }
   }
   if (warnings.length) report.warnings = warnings;
   if (typeof config?.transport === 'string' && config.transport) {

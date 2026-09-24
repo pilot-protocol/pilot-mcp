@@ -4,15 +4,18 @@
 // pilot-sandbox skill.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { createSocket } from 'node:dgram';
+import { createServer } from 'node:net';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { daemonBinaryPath } from '../src/daemon-bridge.js';
+import { findExecutable, SANDBOX_PROXY_CMD } from '../src/netproxy.js';
 import { installDaemon, PILOT_SANDBOX_SKILL_URL, planDaemonStart } from '../src/setup/daemon.js';
+import { ensureEgressRelay, findEgressRelay } from '../src/setup/proxy-refresh.js';
 import { daemonFeatures, supportsEgressProxy } from '../src/setup/runtime.js';
 import { probeTransport } from '../src/setup/transport.js';
 
@@ -45,6 +48,11 @@ const AUTO_USAGE = `Usage of pilot-daemon:
   -trust-auto-approve
     \tauto-approve all incoming handshake requests
 `;
+// The runtime with -proxy-cmd (web4 feat/native-https-proxy 1dd9e8e7), whose
+// daemon re-reads rotating proxy credentials itself.
+const CMD_USAGE = AUTO_USAGE.replace('  -transport string', `  -proxy-cmd string
+    \tcommand (run with /bin/sh -c) whose output is the current proxy URL, for egress proxies that rotate their credentials: it supplies the URL -proxy would use (the explicit URL, or with auto the environment's proxy) and is re-run every 60s and whenever the proxy answers 407, so new connections always carry fresh credentials. Example: bash -c 'printf %s "$https_proxy"'. Precedence: this flag, $PILOT_PROXY_CMD, config.json "proxy_cmd".
+  -transport string`);
 const LEGACY_USAGE = `Usage of pilot-daemon:
   -registry-tls
     \tuse TLS for registry connection
@@ -678,6 +686,258 @@ test('a runtime with -transport=auto gets no recorded transport, and loses the o
   assert.deepEqual(readConfig(fx), { registry: '34.71.57.205:9000', email: 'agent@example.com' });
 });
 
+// Rotating proxy credentials (Meta Muse rotates the ones in HTTPS_PROXY every
+// few minutes): the daemon must re-read them, or its new connections fail
+// with 407 once they rotate.
+const SANDBOX = Object.freeze({ sandbox: true, bash: true });
+const NOT_SANDBOX = Object.freeze({ sandbox: false, bash: true });
+
+test('in a sandbox, a daemon with -proxy-cmd re-reads rotating proxy credentials, and later starts keep it', { skip }, async (t) => {
+  const fx = fixture(t, CMD_USAGE);
+  const lines = [];
+  const result = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX,
+    log: (line) => lines.push(line),
+    relay: { find: () => assert.fail('a daemon with -proxy-cmd needs no relay') },
+  });
+  const [start] = fx.calls();
+  assert.deepEqual(start.args, ['daemon', 'start']);
+  assert.equal(start.env.PILOT_PROXY_CMD, SANDBOX_PROXY_CMD);
+  // The daemon still gets the launch-time proxy: it serves until the first
+  // run of the command, and the command replaces it from then on.
+  assert.equal(start.env.HTTPS_PROXY, PROXY);
+  assert.equal(readConfig(fx).proxy_cmd, SANDBOX_PROXY_CMD);
+  assert.equal(result.proxy_refresh, 'proxy-cmd');
+  assert.equal(result.trust_verified, true);
+  const output = lines.join('\n');
+  assert.match(output, /re-reads them every 60s and on a 407/);
+  assert.match(output, /Saved it as "proxy_cmd" in .*config\.json/);
+  assert.doesNotMatch(output + readFileSync(fx.config, 'utf8'), /s3cr3t|muse-agent/);
+
+  // The next setup finds it in config.json: nothing is handed over or saved
+  // again, and pilot-daemon reads it from there.
+  const again = [];
+  const second = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: (line) => again.push(line) });
+  assert.equal(fx.calls()[2].env.PILOT_PROXY_CMD, '<unset>');
+  assert.equal(second.proxy_refresh, 'proxy-cmd');
+  assert.match(again.join('\n'), /re-reads them with the proxy command from config\.json proxy_cmd/);
+  assert.doesNotMatch(again.join('\n'), /Saved/);
+});
+
+test('a proxy command the user configured is honoured and never replaced', { skip }, async (t) => {
+  const mine = "sh -c 'cat /run/secrets/proxy-url'";
+  for (const [where, extra] of [['env', { PILOT_PROXY_CMD: mine }], ['config', {}]]) {
+    const fx = fixture(t, CMD_USAGE);
+    if (where === 'config') withConfig(fx, { proxy_cmd: mine });
+    const lines = [];
+    const result = await installDaemon({
+      transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY, ...extra }), home: fx.home, host: SANDBOX, log: (line) => lines.push(line),
+    });
+    const [start] = fx.calls();
+    assert.equal(start.env.PILOT_PROXY_CMD, where === 'env' ? mine : '<unset>', where);
+    assert.equal(readConfig(fx).proxy_cmd, where === 'config' ? mine : undefined, where);
+    assert.equal(result.proxy_refresh, 'proxy-cmd', where);
+    assert.match(lines.join('\n'), where === 'env' ? /proxy command from PILOT_PROXY_CMD/ : /proxy command from config\.json proxy_cmd/);
+    // The command is configuration that may hold a URL: never printed.
+    assert.doesNotMatch(lines.join('\n'), /run\/secrets/, where);
+  }
+  // Configured, the command applies outside a sandbox too.
+  const fx = fixture(t, CMD_USAGE);
+  const result = await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY, PILOT_PROXY_CMD: mine }), home: fx.home, host: NOT_SANDBOX, log: () => {},
+  });
+  assert.equal(result.proxy_refresh, 'proxy-cmd');
+  assert.equal(fx.calls()[0].env.PILOT_PROXY_CMD, mine);
+});
+
+test('no proxy command where credentials cannot rotate or the proxy is not the environment\'s', { skip }, async (t) => {
+  const cases = [
+    ['not a sandbox', 'compat', { HTTPS_PROXY: PROXY }, NOT_SANDBOX],
+    ['no bash', 'compat', { HTTPS_PROXY: PROXY }, { sandbox: true, bash: false }],
+    ['no credentials', 'compat', { HTTPS_PROXY: 'http://proxy.muse.internal:3128' }, SANDBOX],
+    ['UDP works', 'udp', { HTTPS_PROXY: PROXY }, SANDBOX],
+    ['explicit PILOT_PROXY', 'compat', { PILOT_PROXY: PROXY, HTTPS_PROXY: PROXY }, SANDBOX],
+    ['PILOT_PROXY=off', 'compat', { PILOT_PROXY: 'off', HTTPS_PROXY: PROXY }, SANDBOX],
+  ];
+  for (const [label, probed, extra, host] of cases) {
+    const fx = fixture(t, CMD_USAGE);
+    const lines = [];
+    const result = await installDaemon({ transport: probed, autoStart: true, env: fx.env(extra), home: fx.home, host, log: (line) => lines.push(line) });
+    assert.equal(fx.calls()[0].env.PILOT_PROXY_CMD, '<unset>', label);
+    assert.equal(readConfig(fx).proxy_cmd, undefined, label);
+    assert.equal(result.proxy_refresh, undefined, label);
+    assert.doesNotMatch(lines.join('\n'), /credentials/, label);
+  }
+  // A config.json "proxy" URL is left alone too.
+  const fx = fixture(t, CMD_USAGE);
+  withConfig(fx, { proxy: PROXY });
+  const result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: () => {} });
+  assert.equal(fx.calls()[0].env.PILOT_PROXY_CMD, '<unset>');
+  assert.equal(result.proxy_refresh, undefined);
+});
+
+test('a daemon with -proxy but without -proxy-cmd goes through the pilot-sandbox egress relay', { skip }, async (t) => {
+  for (const usage of [PROXY_USAGE, AUTO_USAGE]) {
+    const fx = fixture(t, usage);
+    const script = join(fx.home, 'workspace', 'skills', 'pilot-sandbox', 'scripts', 'egress_relay.py');
+    const ensured = [];
+    const lines = [];
+    const result = await installDaemon({
+      transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY, https_proxy: PROXY }), home: fx.home, host: SANDBOX,
+      log: (line) => lines.push(line),
+      relay: {
+        find: () => script,
+        ensure: async (options) => { ensured.push(options); return { ok: true, reused: false }; },
+      },
+    });
+    const [start] = fx.calls();
+    assert.equal(start.env.HTTPS_PROXY, 'http://127.0.0.1:3128');
+    assert.equal(start.env.https_proxy, 'http://127.0.0.1:3128');
+    assert.equal(start.env.PILOT_PROXY_CMD, '<unset>');
+    assert.equal(ensured.length, 1);
+    assert.equal(ensured[0].script, script);
+    assert.equal(ensured[0].command, undefined);
+    assert.equal(result.proxy_refresh, 'relay');
+    assert.equal(result.proxy, REDACTED);
+    assert.equal(readConfig(fx).proxy_cmd, undefined);
+    const output = lines.join('\n');
+    assert.match(output, /predates -proxy-cmd: it goes through the pilot-sandbox egress relay/);
+    assert.match(output, /started on 127\.0\.0\.1:3128/);
+    assert.doesNotMatch(output, /s3cr3t|muse-agent/);
+  }
+  // A proxy command the user configured is what the relay reads with.
+  const fx = fixture(t, PROXY_USAGE);
+  const ensured = [];
+  await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY, PILOT_PROXY_CMD: 'cat /run/proxy' }), home: fx.home, host: NOT_SANDBOX, log: () => {},
+    relay: { find: () => '/x/egress_relay.py', ensure: async (options) => { ensured.push(options); return { ok: true, reused: true }; } },
+  });
+  assert.equal(ensured[0].command, 'cat /run/proxy');
+  assert.equal(fx.calls()[0].env.HTTPS_PROXY, 'http://127.0.0.1:3128');
+});
+
+test('without -proxy-cmd and without a usable relay, setup says the credentials will go stale', { skip }, async (t) => {
+  const cases = [
+    ['no relay', { find: () => null }, /no egress relay \(egress_relay\.py\) was found/],
+    ['relay fails', { find: () => '/w/egress_relay.py', ensure: async () => ({ ok: false, error: 'python3 is not installed' }) }, /the egress relay \/w\/egress_relay\.py could not be used: python3 is not installed/],
+  ];
+  for (const [label, relay, reason] of cases) {
+    const fx = fixture(t, PROXY_USAGE);
+    const lines = [];
+    const result = await installDaemon({ transport: 'compat', autoStart: true, env: fx.env({ HTTPS_PROXY: PROXY }), home: fx.home, host: SANDBOX, log: (line) => lines.push(line), relay });
+    const output = lines.join('\n');
+    assert.equal(fx.calls()[0].env.HTTPS_PROXY, PROXY, label);
+    assert.deepEqual(fx.calls()[0].args, ['daemon', 'start', '--transport', 'compat'], label);
+    assert.equal(result.proxy_refresh, 'stale', label);
+    assert.match(output, /Warning: proxy credentials can rotate, but .*pilot-daemon predates -proxy-cmd/, label);
+    assert.match(output, reason, label);
+    assert.match(output, /egress_relay\.py\) and re-run setup/, label);
+  }
+  // An explicit PILOT_PROXY URL is not the environment's: the relay would not
+  // replace it, so it is not started.
+  const fx = fixture(t, PROXY_USAGE);
+  const lines = [];
+  await installDaemon({
+    transport: 'compat', autoStart: true, env: fx.env({ PILOT_PROXY: PROXY, PILOT_PROXY_CMD: 'cat /run/proxy' }), home: fx.home, host: SANDBOX, log: (line) => lines.push(line),
+    relay: { find: () => assert.fail('an explicit proxy is not relayed') },
+  });
+  assert.match(lines.join('\n'), /the proxy is set explicitly \(PILOT_PROXY\)/);
+  assert.equal(fx.calls()[0].env.PILOT_PROXY, PROXY);
+  // A daemon without -proxy gets the pilot-sandbox pointer only.
+  const legacy = fixture(t, LEGACY_USAGE);
+  const legacyLines = [];
+  const legacyResult = await installDaemon({
+    transport: 'compat', autoStart: true, env: legacy.env({ HTTPS_PROXY: PROXY }), home: legacy.home, host: SANDBOX, log: (line) => legacyLines.push(line),
+    upgradeRuntime: () => ({ upgraded: false, reason: 'test' }), relay: { find: () => assert.fail('no relay for a daemon without -proxy') },
+  });
+  assert.equal(legacyResult.proxy_refresh, undefined);
+  assert.match(legacyLines.join('\n'), /has no -proxy flag/);
+});
+
+test('the egress relay is started once, reused while it runs, and a port held by another program is never used', { skip, timeout: 20_000 }, async (t) => {
+  const python = findExecutable('python3');
+  if (!python || !findExecutable('bash')) {
+    t.skip('python3 and bash are needed');
+    return;
+  }
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'pilot-relay-')));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  const port = await freePort();
+  const address = { host: '127.0.0.1', port };
+  // A stand-in for egress_relay.py: listens where the relay would, and
+  // records the credential command it was given.
+  const script = join(work, 'egress_relay.py');
+  writeFileSync(script, `import os, socket, sys
+open(${JSON.stringify(join(work, 'cmd'))}, 'w').write(os.environ.get('RELAY_CRED_CMD', '<default>'))
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', ${port})); s.listen(8)
+while True:
+    c, _ = s.accept(); c.close()
+`);
+  const env = { PATH: process.env.PATH };
+  const started = await ensureEgressRelay({ script, env, command: 'cat /run/proxy', address, running: () => assert.fail('nothing listens yet') });
+  assert.deepEqual(started, { ok: true, reused: false });
+  t.after(() => spawnSync('pkill', ['-f', script]));
+  assert.equal(readFileSync(join(work, 'cmd'), 'utf8'), 'cat /run/proxy');
+  assert.deepEqual(await ensureEgressRelay({ script, env, address, running: () => true }), { ok: true, reused: true });
+  const busy = await ensureEgressRelay({ script, env, address, running: () => false });
+  assert.equal(busy.ok, false);
+  assert.match(busy.error, /is in use by another program/);
+
+  // A relay that cannot listen is reported, not waited on forever.
+  const broken = join(work, 'broken.py');
+  writeFileSync(broken, 'import sys\nsys.exit(1)\n');
+  const other = { host: '127.0.0.1', port: await freePort() };
+  const failed = await ensureEgressRelay({ script: broken, env, address: other, waitMs: 2_000 });
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /exited at once/);
+  assert.equal((await ensureEgressRelay({ script, env: { PATH: '/nonexistent' }, address: other })).error, 'python3 is not installed');
+});
+
+test('the egress relay is found where the pilot-sandbox skill is installed', { skip }, (t) => {
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'pilot-relay-find-')));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  const place = (...parts) => {
+    const dir = join(work, ...parts, 'pilot-sandbox', 'scripts');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'egress_relay.py'), '');
+    return join(dir, 'egress_relay.py');
+  };
+  assert.equal(findEgressRelay({ home: work, env: {} }), null);
+  const claude = place('.claude', 'skills');
+  assert.equal(findEgressRelay({ home: work, env: {} }), claude);
+  const muse = place('workspace', 'skills');
+  assert.equal(findEgressRelay({ home: work, env: {} }), muse);
+  const custom = place('custom');
+  assert.equal(findEgressRelay({ home: work, env: { MUSE_SKILLS_DIR: join(work, 'custom') } }), custom);
+  assert.equal(findEgressRelay({ home: work, env: { PILOT_EGRESS_RELAY: claude } }), claude);
+  assert.equal(findEgressRelay({ home: work, env: { PILOT_EGRESS_RELAY: join(work, 'missing.py') } }), null);
+});
+
+test('doctor reports the proxy command and a daemon that ignores it, never the command', { skip }, async (t) => {
+  const cli = new URL('../cli.js', import.meta.url).pathname;
+  const doctor = async (fx, extra = {}, args = ['--json']) => (await promisify(execFile)(process.execPath, [cli, 'doctor', ...args], {
+    env: { HOME: fx.home, PATH: '/usr/bin:/bin', PILOTCTL_BIN: fx.pilotctl, PILOT_SOCKET: join(fx.work, 'missing.sock'), ...extra },
+  })).stdout;
+  const secret = 'echo http://muse-agent:s3cr3t@proxy:3128';
+  let fx = fixture(t, CMD_USAGE);
+  withConfig(fx, { proxy_cmd: secret });
+  let report = JSON.parse(await doctor(fx, { HTTPS_PROXY: PROXY }));
+  assert.deepEqual(report.network.proxy_cmd, { source: 'config.json proxy_cmd', daemon_support: true });
+  assert.equal(report.network.warnings, undefined);
+  assert.match(await doctor(fx, {}, []), /^Proxy credentials: re-read by pilot-daemon with the proxy command from config\.json proxy_cmd$/m);
+  report = JSON.parse(await doctor(fx, { PILOT_PROXY_CMD: secret }));
+  assert.equal(report.network.proxy_cmd.source, 'PILOT_PROXY_CMD');
+
+  fx = fixture(t, PROXY_USAGE);
+  withConfig(fx, { proxy_cmd: secret });
+  const stdout = await doctor(fx, { HTTPS_PROXY: PROXY });
+  report = JSON.parse(stdout);
+  assert.deepEqual(report.network.proxy_cmd, { source: 'config.json proxy_cmd', daemon_support: false });
+  assert.match(report.network.warnings.join('\n'), /config\.json proxy_cmd is set, but the installed pilot-daemon predates -proxy-cmd and ignores it/);
+  assert.doesNotMatch(stdout, /s3cr3t|muse-agent/);
+});
+
 test('-proxy support is read from the daemon\'s flag list', { skip }, (t) => {
   const fx = fixture(t, PROXY_USAGE);
   assert.equal(supportsEgressProxy(fx.daemon), true);
@@ -691,18 +951,27 @@ test('-proxy support is read from the daemon\'s flag list', { skip }, (t) => {
 
 test('-transport=auto support is read from the -transport usage alone', { skip }, (t) => {
   const fx = fixture(t, AUTO_USAGE);
-  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, autoTransport: true });
+  const none = { known: false, proxy: false, proxyCmd: false, autoTransport: false };
+  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, proxyCmd: false, autoTransport: true });
   fx.writeDaemon(PROXY_USAGE);
-  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, autoTransport: false });
+  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, proxyCmd: false, autoTransport: false });
   fx.writeDaemon(LEGACY_USAGE);
-  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: false, autoTransport: false });
+  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: false, proxyCmd: false, autoTransport: false });
   // 'auto' in another flag's usage (-proxy's default) does not count.
   fx.writeDaemon("  -proxy string\n    \tproxy: 'auto' or 'off'\n  -transport string\n    \t'udp' or 'compat'\n  -zz\n    \tsee 'auto'\n");
-  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, autoTransport: false });
+  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, proxyCmd: false, autoTransport: false });
   fx.writeDaemon('not a daemon\n');
-  assert.deepEqual(daemonFeatures(fx.daemon), { known: false, proxy: false, autoTransport: false });
-  assert.deepEqual(daemonFeatures(join(fx.work, 'missing')), { known: false, proxy: false, autoTransport: false });
-  assert.deepEqual(daemonFeatures(null), { known: false, proxy: false, autoTransport: false });
+  assert.deepEqual(daemonFeatures(fx.daemon), none);
+  assert.deepEqual(daemonFeatures(join(fx.work, 'missing')), none);
+  assert.deepEqual(daemonFeatures(null), none);
+});
+
+test('-proxy-cmd support is read from its own flag line', { skip }, (t) => {
+  const fx = fixture(t, CMD_USAGE);
+  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, proxyCmd: true, autoTransport: true });
+  // -proxy's usage naming -proxy-cmd, or a longer flag, does not count.
+  fx.writeDaemon('  -proxy string\n    \tsee -proxy-cmd\n  -proxy-cmdline string\n    \tx\n');
+  assert.deepEqual(daemonFeatures(fx.daemon), { known: true, proxy: true, proxyCmd: false, autoTransport: false });
 });
 
 test('the daemon is located the way pilotctl locates it', { skip }, (t) => {
@@ -840,7 +1109,7 @@ function fixture(t, usage) {
   writeFileSync(pilotctl, `#!/bin/sh
 {
   printf 'ARGS'; for arg in "$@"; do printf '\\t%s' "$arg"; done; printf '\\n'
-  printf 'ENV\\tHTTPS_PROXY=%s\\tNO_PROXY=%s\\tPILOT_PROXY=%s\\tPILOT_TRANSPORT=%s\\n' "\${HTTPS_PROXY-}" "\${NO_PROXY-}" "\${PILOT_PROXY-<unset>}" "\${PILOT_TRANSPORT-<unset>}"
+  printf 'ENV\\tHTTPS_PROXY=%s\\thttps_proxy=%s\\tNO_PROXY=%s\\tPILOT_PROXY=%s\\tPILOT_TRANSPORT=%s\\tPILOT_PROXY_CMD=%s\\n' "\${HTTPS_PROXY-}" "\${https_proxy-<unset>}" "\${NO_PROXY-}" "\${PILOT_PROXY-<unset>}" "\${PILOT_TRANSPORT-<unset>}" "\${PILOT_PROXY_CMD-<unset>}"
 } >> '${log}'
 if [ "$1 $2" = "daemon start" ]; then
   case "\${PILOT_TRANSPORT-}" in
@@ -900,4 +1169,15 @@ function readConfig(fx) {
 // withConfig merges keys into the fixture's config.json.
 function withConfig(fx, keys) {
   writeFileSync(fx.config, JSON.stringify({ ...readConfig(fx), ...keys }));
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
 }

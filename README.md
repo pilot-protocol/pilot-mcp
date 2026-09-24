@@ -202,9 +202,34 @@ there, as a normal user or as root, and needs no systemd or launchd:
   applies it (its pilotctl passes it on; `auto` only with `-transport=auto`);
   released runtimes before that (v1.13.9) ignore it, and setup says so and
   reports the transport the daemon really runs.
+- Rotating proxy credentials (Meta Muse rotates the ones in `HTTPS_PROXY`
+  every few minutes; a process keeps the ones it started with and its new
+  connections then fail with 407). The proxy command, `PILOT_PROXY_CMD` or
+  `"proxy_cmd"` in `~/.pilot/config.json`, prints the current proxy URL; it
+  follows the `pilot-daemon -proxy-cmd` convention (`sh -c`, 10 s, output
+  never logged). In a Linux container or VM without systemd whose
+  `HTTPS_PROXY`/`https_proxy` carries credentials, with nothing configured,
+  setup uses the sandbox default `bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'`
+  (a fresh shell sees the current credentials), as pilotctl and `install.sh`
+  do.
+  - Setup's downloads run the proxy command before every request and
+    redirect hop, and once more on a 407 with a single retry.
+  - A `pilot-daemon` with `-proxy-cmd` gets the command: the sandbox default
+    is handed over as `PILOT_PROXY_CMD` and saved as `"proxy_cmd"` (never over
+    one that is there), so later starts keep re-reading the credentials; a
+    configured command is left for the daemon to read.
+  - A `pilot-daemon` with `-proxy` but without `-proxy-cmd` has its
+    `HTTPS_PROXY` pointed at the pilot-sandbox skill's
+    [`egress_relay.py`](https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-sandbox/scripts/egress_relay.py)
+    on `127.0.0.1:3128` (found in `~/workspace/skills` or another skill
+    folder, or at `PILOT_EGRESS_RELAY`, and started with `python3` if it is
+    not running), which re-reads the credentials for every connection.
+    Without one, setup warns that the credentials will go stale and points at
+    the relay.
 - `npx -y pilotprotocol-mcp doctor` shows the proxy the daemon would use
   (credentials redacted) or `off` and which setting chose it, whether the
-  daemon can use the proxy, any proxy or transport setting that is ignored or
+  daemon can use the proxy, where a proxy command comes from and whether the
+  daemon supports it, any proxy or transport setting that is ignored or
   refused, and the recorded transport.
 
 ## Privacy and optional management

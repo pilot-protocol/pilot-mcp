@@ -19,7 +19,8 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execPilotctl } from '../daemon-bridge.js';
-import { inspectProxy } from '../netproxy.js';
+import { inspectProxy, proxyCommandFor } from '../netproxy.js';
+import { readPilotConfig } from './pilot-config.js';
 import { ensurePilotRuntime } from './runtime.js';
 import { detectHarnesses } from './detect.js';
 import { installDaemon, PILOT_SANDBOX_SKILL_URL } from './daemon.js';
@@ -33,7 +34,10 @@ export async function runSetup(flags) {
   await step('1', 'Pilot runtime', async () => {
     // Proxy settings never stop setup: an unusable value is ignored with a
     // warning, and downloads fall back to the proxy environment or go direct.
-    for (const warning of inspectProxy(process.env).warnings) log(`  Warning: ${warning}`);
+    const proxy = inspectProxy(process.env);
+    for (const warning of proxy.warnings) log(`  Warning: ${warning}`);
+    const command = proxy.mode === 'off' ? null : proxyCommandFor(process.env, readPilotConfig().config ?? {});
+    if (command) log(`  Proxy credentials: re-read with the proxy command (${command.source}) before every download.`);
     const binary = await ensurePilotRuntime({ requireManaged: Boolean(opts.managedURL) });
     log(`  Verified runtime: ${binary}`);
   });
@@ -67,6 +71,7 @@ export async function runSetup(flags) {
       opts.transport = daemon.transport ?? opts.transport;
       opts.proxy = daemon.proxy;
       opts.proxy_supported = daemon.proxy_supported;
+      opts.proxy_refresh = daemon.proxy_refresh;
     } catch (error) {
       // Harness attachment remains useful and is safe in unmanaged pass-through
       // mode. Do not abort before writing adapters merely because the separate
@@ -132,6 +137,7 @@ export async function runSetup(flags) {
   if (opts.proxy) {
     log(`  Proxy:     ${opts.proxy}${opts.proxy_supported ? '' : ` (daemon lacks -proxy; see ${PILOT_SANDBOX_SKILL_URL})`}`);
   }
+  if (opts.proxy_refresh) log(`  Proxy credentials: ${PROXY_REFRESH_SUMMARY[opts.proxy_refresh] ?? opts.proxy_refresh}`);
   log(`  Configured: ${configured.join(', ') || '(none)'}`);
   if (skipped.length) log(`  Skipped:    ${skipped.join(', ')}`);
   log('');
@@ -141,6 +147,12 @@ export async function runSetup(flags) {
   log('  npx -y pilotprotocol-mcp peers   — see who you are connected to');
   log('============================================');
 }
+
+const PROXY_REFRESH_SUMMARY = {
+  'proxy-cmd': 're-read by pilot-daemon (proxy_cmd)',
+  relay: 're-read by the pilot-sandbox egress relay on 127.0.0.1:3128',
+  stale: `NOT re-read: pilot-daemon keeps the ones it started with (see ${PILOT_SANDBOX_SKILL_URL})`,
+};
 
 async function resolveOptions(flags) {
   // TODO: interactive prompts via @inquirer/prompts when TTY; env-var fallback otherwise.

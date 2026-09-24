@@ -42,11 +42,25 @@
 // need one. No proxy selected means the request goes to globalThis.fetch
 // unchanged. Proxy credentials never appear in errors, warnings or logs; use
 // redactProxyURL().
+//
+// Rotating credentials (Meta Muse rotates the ones in HTTPS_PROXY every few
+// minutes; a process keeps the ones it started with, and new CONNECTs then
+// fail with 407). The proxy command ("proxy_cmd") prints the current proxy
+// URL; it is the convention of common/netproxy v0.5.15 WithRefreshCommand
+// and pilot-daemon -proxy-cmd: run with `sh -c`, stdin and stderr
+// discarded, for at most 10 seconds, and its trimmed output must be one
+// http:// or https:// URL. Its URL replaces the explicit PILOT_PROXY URL,
+// or in auto the environment's proxy URLs; NO_PROXY and loopback still
+// apply. See proxyCommandFor for where it comes from, and
+// createProxyAwareFetch for how downloads use it.
 
 import { Buffer } from 'node:buffer';
+import { spawn } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { BlockList, isIP } from 'node:net';
+import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import tls from 'node:tls';
 import { URL } from 'node:url';
@@ -184,15 +198,161 @@ export function configuredProxy(env = process.env, options = {}) {
 // for a direct connection.
 export function resolveProxy(target, env = process.env) {
   const url = target instanceof URL ? target : new URL(String(target));
-  const settings = inspectProxy(env);
+  return pickProxy(url, inspectProxy(env), null);
+}
+
+// pickProxy applies resolved settings to one target. `fixed`, the proxy
+// command's latest URL (or null), replaces the explicit URL, or in auto the
+// environment's proxies; NO_PROXY and loopback still apply.
+function pickProxy(url, settings, fixed) {
   if (settings.mode === 'off') return null;
   const host = normalizeHost(url.hostname);
   if (isLoopbackHost(host)) return null;
-  if (settings.mode === 'explicit') return settings.proxy.url;
-  const selected = url.protocol === 'http:' ? (settings.plain ?? settings.proxy) : settings.proxy;
+  if (settings.mode === 'explicit') return fixed ?? settings.proxy.url;
+  const selected = fixed ?? (url.protocol === 'http:' ? (settings.plain ?? settings.proxy) : settings.proxy)?.url;
   if (!selected) return null;
   const port = url.port || (url.protocol === 'http:' ? '80' : '443');
-  return useProxy(settings.noProxy, host, port) ? selected.url : null;
+  return useProxy(settings.noProxy, host, port) ? selected : null;
+}
+
+// SANDBOX_PROXY_CMD is the proxy command for hosted agent sandboxes: a fresh
+// bash sees the sandbox's current proxy URL. pilotctl (daemon start) and
+// install.sh use the same command.
+export const SANDBOX_PROXY_CMD = `bash -c 'printf %s "\${https_proxy:-$HTTPS_PROXY}"'`;
+
+// configuredProxyCommand is the proxy command the user configured, in the
+// order pilot-daemon reads it: $PILOT_PROXY_CMD, then config.json
+// "proxy_cmd". `{ command, source }` or null. The command itself is never
+// logged (a user's command may hold a URL).
+export function configuredProxyCommand(env = process.env, config = {}) {
+  const fromEnv = String(env.PILOT_PROXY_CMD ?? '').trim();
+  if (fromEnv) return { command: fromEnv, source: 'PILOT_PROXY_CMD' };
+  const fromConfig = typeof config?.proxy_cmd === 'string' ? config.proxy_cmd.trim() : '';
+  if (fromConfig) return { command: fromConfig, source: 'config.json proxy_cmd' };
+  return null;
+}
+
+// sandboxHost describes the host the way pilotctl decides on its sandbox
+// default: Linux without systemd (a container or VM such as a hosted agent
+// sandbox, where nothing but pilotctl starts the daemon), and whether bash
+// is installed.
+export function sandboxHost(env = process.env) {
+  return {
+    sandbox: process.platform === 'linux' && !existsSync('/run/systemd/system'),
+    bash: Boolean(findExecutable('bash', env)),
+  };
+}
+
+// sandboxProxyCommandApplies: the proxy environment carries credentials
+// (HTTPS_PROXY or https_proxy, the variables SANDBOX_PROXY_CMD prints), the
+// proxy setting is auto, and the host is a sandbox with bash. pilotctl's
+// sandboxProxyCmdFor and install.sh use the same test.
+export function sandboxProxyCommandApplies(env = process.env, host = sandboxHost(env), settingSpec) {
+  if (!host.sandbox || !host.bash) return false;
+  if (inspectProxy(env, { spec: settingSpec }).mode !== 'auto') return false;
+  return ['HTTPS_PROXY', 'https_proxy'].some((name) => proxyHasCredentials(env[name]));
+}
+
+// proxyCommandFor is the proxy command setup's own downloads use: the
+// configured one, else SANDBOX_PROXY_CMD where it applies. null when none.
+export function proxyCommandFor(env = process.env, config = {}, host = sandboxHost(env)) {
+  const configured = configuredProxyCommand(env, config);
+  if (configured) return configured;
+  return sandboxProxyCommandApplies(env, host) ? { command: SANDBOX_PROXY_CMD, source: 'sandbox default' } : null;
+}
+
+// proxyHasCredentials reports whether a proxy URL carries a user name.
+export function proxyHasCredentials(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return false;
+  const parsed = parseProxyURL(text);
+  return Boolean(parsed.url?.username);
+}
+
+const PROXY_COMMAND_TIMEOUT_MS = 10_000;
+const MAX_PROXY_COMMAND_OUTPUT = 64 * 1024;
+const UNUSABLE_REFRESH = 'the proxy command printed an unusable proxy URL (value withheld; want http://[user:pass@]host[:port] or https://...)';
+
+// runProxyCommand runs a proxy command once and resolves (never rejects)
+// with { url } or { error }. It runs as its own process group, so a timeout
+// kills everything it started. Errors say how it failed and never contain
+// its output.
+export function runProxyCommand(command, { env = process.env, timeoutMs = PROXY_COMMAND_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    let child;
+    try {
+      child = spawn('/bin/sh', ['-c', command], { env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    } catch (error) {
+      resolve({ error: `the proxy command could not run (${error.code ?? 'spawn failed'})` });
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    let overflow = false;
+    let timedOut = false;
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup();
+    }, timeoutMs);
+    child.stdout.on('data', (chunk) => {
+      if (overflow) return;
+      size += chunk.length;
+      if (size > MAX_PROXY_COMMAND_OUTPUT) {
+        overflow = true;
+        killGroup();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.once('error', (error) => finish({ error: `the proxy command could not run (${error.code ?? 'spawn failed'})` }));
+    child.once('close', (code, signal) => {
+      if (timedOut) return finish({ error: `the proxy command timed out after ${timeoutMs / 1000}s` });
+      if (overflow) return finish({ error: `the proxy command printed more than ${MAX_PROXY_COMMAND_OUTPUT} bytes` });
+      if (code !== 0) return finish({ error: `the proxy command failed (${signal ? `signal ${signal}` : `exit status ${code}`})` });
+      return finish(parseRefreshedProxy(Buffer.concat(chunks).toString('utf8')));
+    });
+  });
+}
+
+// parseRefreshedProxy validates a proxy command's output (common/netproxy
+// parseRefreshed): unlike an environment variable it must spell out an
+// http:// or https:// scheme, so a stray token never becomes a proxy host.
+export function parseRefreshedProxy(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return { error: 'the proxy command printed nothing' };
+  const cut = text.indexOf('://');
+  const scheme = cut < 0 ? '' : text.slice(0, cut).toLowerCase();
+  if (scheme !== 'http' && scheme !== 'https') return { error: UNUSABLE_REFRESH };
+  const parsed = parseProxyURL(text);
+  return parsed.url ? { url: parsed.url } : { error: UNUSABLE_REFRESH };
+}
+
+// findExecutable returns the first executable `name` on env.PATH, or null.
+export function findExecutable(name, env = process.env) {
+  for (const dir of String(env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    try {
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Not in this directory.
+    }
+  }
+  return null;
 }
 
 // redactProxyURL renders a proxy URL safe for logs: scheme, host and port,
@@ -212,11 +372,45 @@ export function redactProxyURL(proxy) {
 // subset setup uses: method, headers, string/byte body, redirect and signal.
 // `tls` adds client TLS options (for example a test CA) to tunnelled
 // connections; `directFetch` serves requests that need no proxy.
-export function createProxyAwareFetch({ env = process.env, tls: tlsOptions = {}, directFetch } = {}) {
+//
+// `proxyCommand` (see proxyCommandFor) keeps the credentials fresh where the
+// proxy rotates them: it runs before every request and every redirect hop,
+// so each CONNECT carries the current credentials, and when the proxy still
+// rejects them (407, or a CONNECT reply that does not parse) it runs once
+// more and the request is retried once if that gave a different URL. When a
+// run fails, the last URL it gave (at first the environment's proxy) stays
+// in use. Nothing refreshes in the background: setup's downloads are short.
+export function createProxyAwareFetch({ env = process.env, tls: tlsOptions = {}, directFetch, proxyCommand, runCommand = runProxyCommand } = {}) {
+  const command = String(proxyCommand ?? '').trim();
+  let lastGood = null;
+  const refresh = async () => {
+    const result = await runCommand(command, { env });
+    if (result.url) lastGood = result.url;
+    return result;
+  };
+  const route = async (url, settings) => {
+    if (command && settings.mode !== 'off' && !isLoopbackHost(normalizeHost(url.hostname))) await refresh();
+    return pickProxy(url, settings, command ? lastGood : null);
+  };
+  const tunnel = async (url, proxy, settings, options) => {
+    try {
+      return await tunnelRequest(url, proxy, options);
+    } catch (error) {
+      if (!command || !error.credentialsRejected) throw error;
+      const { error: refreshError } = await refresh();
+      const next = lastGood ? pickProxy(url, settings, lastGood) : null;
+      if (!next || next.href === proxy.href) {
+        if (refreshError) error.message += ` (proxy credential refresh failed: ${refreshError})`;
+        throw error;
+      }
+      return tunnelRequest(url, next, options);
+    }
+  };
   return async function proxyAwareFetch(input, init = {}) {
     const direct = directFetch ?? globalThis.fetch;
+    const settings = inspectProxy(env);
     let url = new URL(String(input instanceof URL ? input.href : input));
-    let proxy = resolveProxy(url, env);
+    let proxy = await route(url, settings);
     if (!proxy) return direct(input, init);
 
     let method = String(init.method ?? 'GET').toUpperCase();
@@ -224,7 +418,7 @@ export function createProxyAwareFetch({ env = process.env, tls: tlsOptions = {},
     const follow = (init.redirect ?? 'follow') === 'follow';
     for (let hop = 0; ; hop++) {
       const response = proxy
-        ? await tunnelRequest(url, proxy, { method, headers: init.headers, body, signal: init.signal, tlsOptions })
+        ? await tunnel(url, proxy, settings, { method, headers: init.headers, body, signal: init.signal, tlsOptions })
         : await direct(url.href, { ...init, method, body, redirect: 'manual' });
       const location = response.headers.get('location');
       if (!follow || !REDIRECT_STATUSES.has(response.status) || !location) return response;
@@ -234,7 +428,7 @@ export function createProxyAwareFetch({ env = process.env, tls: tlsOptions = {},
         method = 'GET';
         body = null;
       }
-      proxy = resolveProxy(url, env);
+      proxy = await route(url, settings);
     }
   };
 }
@@ -486,7 +680,13 @@ function openTunnel(target, proxy, { signal, tlsOptions }) {
       agent: false,
       signal,
     });
-    const refused = (status) => new Error(`proxy ${safeProxy} refused CONNECT ${authority}: HTTP ${status}`);
+    const refused = (status) => {
+      const error = new Error(`proxy ${safeProxy} refused CONNECT ${authority}: HTTP ${status}`);
+      error.proxyStatus = status;
+      // Stale credentials: common/netproxy's credentialsRejected.
+      error.credentialsRejected = status === 407;
+      return error;
+    };
     request.once('connect', (response, socket, head) => {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         socket.destroy();
@@ -501,8 +701,16 @@ function openTunnel(target, proxy, { signal, tlsOptions }) {
       reject(refused(response.statusCode));
     });
     request.once('error', (error) => {
-      if (signal?.aborted) reject(signal.reason ?? error);
-      else reject(new Error(`proxy ${safeProxy} CONNECT ${authority} failed: ${error.message}`));
+      if (signal?.aborted) {
+        reject(signal.reason ?? error);
+        return;
+      }
+      const failure = new Error(`proxy ${safeProxy} CONNECT ${authority} failed: ${error.message}`);
+      // A reply that does not parse as HTTP is how some sandbox proxies
+      // (Meta Muse) answer stale credentials. Node's parser errors (HPE_*)
+      // never quote the reply.
+      if (String(error.code ?? '').startsWith('HPE_')) failure.credentialsRejected = true;
+      reject(failure);
     });
     request.end();
   });

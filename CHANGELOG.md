@@ -64,11 +64,25 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
   ignores it) setup says so and the summary reports the transport the daemon
   really runs. When compat mode is needed without a proxy, setup prints the
   `pilotctl config` commands that switch the installed runtime to it.
+- Rotating proxy credentials (Meta Muse rotates them every few minutes). The
+  proxy command (`PILOT_PROXY_CMD`, config.json `"proxy_cmd"`, or in a Linux
+  container or VM without systemd whose `HTTPS_PROXY` carries credentials the
+  sandbox default `bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'`) is
+  run before every download request and redirect hop, and once more on a 407
+  (or an unparseable CONNECT reply) with one retry, the convention of common
+  v0.5.15 and `pilot-daemon -proxy-cmd`. A `pilot-daemon` with `-proxy-cmd`
+  gets it (the sandbox default as `PILOT_PROXY_CMD`, also saved as
+  `"proxy_cmd"` in config.json unless one is there); one with `-proxy` but not
+  `-proxy-cmd` goes through the pilot-sandbox skill's `egress_relay.py` on
+  `127.0.0.1:3128`, started if it is not running; otherwise setup warns that
+  the credentials will go stale. The setup summary reports it
+  (`proxy_refresh`).
 - `doctor` reports the proxy the daemon would use (redacted), or `off` and
   the setting that chose it (`network.mode`, `network.setting`), whether the
-  daemon supports `-proxy`, ignored or refused proxy and transport settings
-  (`network.warnings`) and the transport recorded in config.json
-  (`network.transport`).
+  daemon supports `-proxy`, where a proxy command comes from and whether the
+  daemon supports `-proxy-cmd` (`network.proxy_cmd`), ignored or refused proxy
+  and transport settings (`network.warnings`) and the transport recorded in
+  config.json (`network.transport`).
 
 ## [0.2.13] - 2026-08-07
 

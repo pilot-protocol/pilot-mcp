@@ -20,8 +20,12 @@ import {
   daemonProxySetting,
   inspectProxy,
   parseProxySetting,
+  proxyCommandFor,
+  proxyHasCredentials,
   redactProxyURL,
   resolveProxy,
+  runProxyCommand,
+  SANDBOX_PROXY_CMD,
 } from '../src/netproxy.js';
 
 const CREDENTIALS = 'muse-agent:s3cr3t/p@ss';
@@ -606,6 +610,219 @@ test('unescaped credentials authenticate through the tunnel exactly as percent-e
   assert.deepEqual(proxy.log.map((entry) => entry.authorized), [true, true, true]);
 });
 
+// Rotating credentials (Meta Muse): the proxy command is re-run before every
+// request and redirect hop, and once more on a 407, with a single retry.
+test('downloads re-read rotating proxy credentials before every request and redirect hop', { timeout: 20_000 }, async (t) => {
+  const origin = await startServer(http.createServer((req, res) => {
+    if (req.url === '/moved') {
+      res.writeHead(302, { location: 'http://assets.pilot.invalid:443/manifest.json' });
+      res.end();
+      return;
+    }
+    res.end(`ok:${req.headers.host}${req.url}`);
+  }));
+  t.after(() => origin.close());
+  // Every set of credentials lets exactly one CONNECT through.
+  const proxy = await startRotatingProxy(t, { 'releases.pilot.invalid': origin.port, 'assets.pilot.invalid': origin.port }, { rotateAfterConnect: true });
+  t.after(() => proxy.close());
+
+  // The launch-time HTTPS_PROXY is stale after the first CONNECT.
+  const fetcher = createProxyAwareFetch({ env: { HTTPS_PROXY: proxy.url }, proxyCommand: proxy.command, directFetch: refuseDirect });
+  for (let i = 0; i < 3; i++) {
+    assert.equal(await (await fetcher('http://releases.pilot.invalid:443/moved')).text(), 'ok:assets.pilot.invalid:443/manifest.json');
+  }
+  assert.equal(proxy.log.length, 6);
+  assert.ok(proxy.log.every((entry) => entry.authorized), JSON.stringify(proxy.log));
+
+  // Without the command the redirect hop, the next CONNECT, is refused.
+  const stale = createProxyAwareFetch({ env: { HTTPS_PROXY: proxy.urlFor(proxy.generation()) }, directFetch: refuseDirect });
+  await assert.rejects(stale('http://releases.pilot.invalid:443/moved'), /refused CONNECT assets\.pilot\.invalid:443: HTTP 407/);
+});
+
+test('a 407 re-runs the proxy command and retries once with the new credentials', { timeout: 20_000 }, async (t) => {
+  const origin = await startServer(http.createServer((req, res) => res.end('ok')));
+  t.after(() => origin.close());
+  for (const malformed of [false, true]) {
+    // The credentials rotate between the command's run and the CONNECT.
+    const proxy = await startRotatingProxy(t, { 'releases.pilot.invalid': origin.port }, { rotateBefore: (count) => count === 0, malformed });
+    t.after(() => proxy.close());
+    let runs = 0;
+    const counted = async (command, options) => {
+      runs += 1;
+      return runProxyCommand(command, options);
+    };
+    const fetcher = createProxyAwareFetch({ env: { HTTPS_PROXY: proxy.url }, proxyCommand: proxy.command, runCommand: counted, directFetch: refuseDirect });
+    assert.equal(await (await fetcher('http://releases.pilot.invalid:443/')).text(), 'ok', `malformed=${malformed}`);
+    assert.deepEqual(proxy.log.map((entry) => entry.authorized), [false, true], `malformed=${malformed}`);
+    assert.equal(runs, 2);
+  }
+
+  // Credentials that are refused every time: one retry, then the 407.
+  const proxy = await startRotatingProxy(t, { 'releases.pilot.invalid': origin.port }, { rotateBefore: () => true });
+  t.after(() => proxy.close());
+  const fetcher = createProxyAwareFetch({ env: { HTTPS_PROXY: proxy.url }, proxyCommand: proxy.command, directFetch: refuseDirect });
+  await assert.rejects(fetcher('http://releases.pilot.invalid:443/'), (error) => {
+    assert.match(error.message, /refused CONNECT releases\.pilot\.invalid:443: HTTP 407/);
+    assert.doesNotMatch(error.message, /rot\d|muse-agent/);
+    return true;
+  });
+  assert.equal(proxy.log.length, 2);
+
+  // A refusal that is not about credentials is not retried.
+  const plain = await startConnectProxy({});
+  t.after(() => plain.close());
+  let runs = 0;
+  const once = createProxyAwareFetch({
+    env: {},
+    proxyCommand: 'x',
+    directFetch: refuseDirect,
+    runCommand: async () => {
+      runs += 1;
+      return { url: new URL(plain.url) };
+    },
+  });
+  await assert.rejects(once('https://github.com:8443/'), /HTTP 403/);
+  assert.equal(runs, 1);
+  assert.equal(plain.log.length, 1);
+});
+
+test('a failing proxy command keeps the last URL it gave, at first the environment\'s proxy', { timeout: 20_000 }, async (t) => {
+  const origin = await startServer(http.createServer((req, res) => res.end('ok')));
+  t.after(() => origin.close());
+  const proxy = await startConnectProxy({ 'releases.pilot.invalid': origin.port });
+  t.after(() => proxy.close());
+  const dir = mkdtempSync(join(tmpdir(), 'pilot-proxy-cmd-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = 'http://releases.pilot.invalid:443/';
+  const wrong = proxy.url.replace('s3cr3t', 'wrong-secret');
+
+  // Fails from the start: the environment's proxy serves.
+  let fetcher = createProxyAwareFetch({ env: { HTTPS_PROXY: proxy.url }, proxyCommand: 'exit 3', directFetch: refuseDirect });
+  assert.equal(await (await fetcher(target)).text(), 'ok');
+  // ...and when that one is refused too, the error says why no fresh
+  // credentials came, without either credential.
+  fetcher = createProxyAwareFetch({ env: { HTTPS_PROXY: wrong }, proxyCommand: 'exit 3', directFetch: refuseDirect });
+  await assert.rejects(fetcher(target), (error) => {
+    assert.match(error.message, /HTTP 407 \(proxy credential refresh failed: the proxy command failed \(exit status 3\)\)/);
+    assert.doesNotMatch(error.message, /wrong-secret|s3cr3t|muse-agent/);
+    return true;
+  });
+
+  // Worked once, then prints something unusable: the last good URL stays.
+  const file = join(dir, 'url');
+  writeFileSync(file, proxy.url);
+  fetcher = createProxyAwareFetch({ env: { HTTPS_PROXY: wrong }, proxyCommand: `cat '${file}'`, directFetch: refuseDirect });
+  assert.equal(await (await fetcher(target)).text(), 'ok');
+  writeFileSync(file, 'muse-agent:s3cr3t@proxy-without-scheme:3128');
+  assert.equal(await (await fetcher(target)).text(), 'ok');
+  assert.deepEqual(proxy.log.map((entry) => entry.authorized), [true, false, true, true]);
+
+  // PILOT_PROXY=off turns proxying off: the command is not even run.
+  let runs = 0;
+  const direct = async () => new Response('direct');
+  fetcher = createProxyAwareFetch({
+    env: { PILOT_PROXY: 'off', HTTPS_PROXY: proxy.url },
+    proxyCommand: 'x',
+    directFetch: direct,
+    runCommand: async () => {
+      runs += 1;
+      return {};
+    },
+  });
+  assert.equal(await (await fetcher(target)).text(), 'direct');
+  assert.equal(runs, 0);
+});
+
+test('the proxy command runs the way pilot-daemon runs it: sh -c, bounded, output withheld', { timeout: 20_000 }, async (t) => {
+  assert.equal(show((await runProxyCommand("printf ' http://muse-agent:s3cr3t@proxy:3128\\n'")).url), 'http://muse-agent:s3cr3t@proxy:3128');
+  assert.equal(show((await runProxyCommand('printf %s "$X"', { env: { X: 'https://p.corp:8443' } })).url), 'https://p.corp:8443');
+  for (const [command, expected] of [
+    ['echo http://muse-agent:s3cr3t@proxy:3128; exit 2', /^the proxy command failed \(exit status 2\)$/],
+    ['true', /^the proxy command printed nothing$/],
+    ['echo muse-agent:s3cr3t@proxy:3128', /unusable proxy URL \(value withheld/],
+    ['echo socks5://muse-agent:s3cr3t@proxy:1080', /unusable proxy URL \(value withheld/],
+    ['head -c 70000 /dev/zero | tr "\\000" a', /printed more than 65536 bytes/],
+  ]) {
+    const result = await runProxyCommand(command);
+    assert.equal(result.url, undefined, command);
+    assert.match(result.error, expected, command);
+    assert.doesNotMatch(result.error, /s3cr3t|muse-agent/, command);
+  }
+  // A hung command is killed along with everything it started.
+  const dir = mkdtempSync(join(tmpdir(), 'pilot-proxy-cmd-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pidFile = join(dir, 'pid');
+  const started = Date.now();
+  const hung = await runProxyCommand(`sleep 30 & echo $! > '${pidFile}'; wait`, { timeoutMs: 300 });
+  assert.match(hung.error, /timed out after 0\.3s/);
+  assert.ok(Date.now() - started < 5_000);
+  const child = Number(readFileSync(pidFile, 'utf8'));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.throws(() => process.kill(child, 0), { code: 'ESRCH' });
+});
+
+test('setup\'s proxy command: the configured one, else the sandbox default where credentials can rotate', () => {
+  const sandbox = { sandbox: true, bash: true };
+  const creds = 'http://muse-agent:s3cr3t@proxy:3128';
+  assert.deepEqual(proxyCommandFor({ PILOT_PROXY_CMD: ' cat /x ' }, { proxy_cmd: 'cat /y' }, sandbox), { command: 'cat /x', source: 'PILOT_PROXY_CMD' });
+  assert.deepEqual(proxyCommandFor({}, { proxy_cmd: 'cat /y' }, { sandbox: false, bash: false }), { command: 'cat /y', source: 'config.json proxy_cmd' });
+  assert.deepEqual(proxyCommandFor({ HTTPS_PROXY: creds }, {}, sandbox), { command: SANDBOX_PROXY_CMD, source: 'sandbox default' });
+  assert.deepEqual(proxyCommandFor({ https_proxy: creds }, { proxy_cmd: '  ' }, sandbox), { command: SANDBOX_PROXY_CMD, source: 'sandbox default' });
+  // The command pilotctl and install.sh use, byte for byte.
+  assert.equal(SANDBOX_PROXY_CMD, 'bash -c \'printf %s "${https_proxy:-$HTTPS_PROXY}"\'');
+  for (const [label, env, host] of [
+    ['not a sandbox', { HTTPS_PROXY: creds }, { sandbox: false, bash: true }],
+    ['no bash', { HTTPS_PROXY: creds }, { sandbox: true, bash: false }],
+    ['no credentials', { HTTPS_PROXY: 'http://proxy:3128' }, sandbox],
+    ['credentials only in ALL_PROXY', { ALL_PROXY: creds }, sandbox],
+    ['explicit PILOT_PROXY', { PILOT_PROXY: creds, HTTPS_PROXY: creds }, sandbox],
+    ['PILOT_PROXY=off', { PILOT_PROXY: 'off', HTTPS_PROXY: creds }, sandbox],
+    ['nothing', {}, sandbox],
+  ]) {
+    assert.equal(proxyCommandFor(env, {}, host), null, label);
+  }
+  assert.equal(proxyHasCredentials('http://u:p@h:1'), true);
+  assert.equal(proxyHasCredentials('u@h:1'), true);
+  assert.equal(proxyHasCredentials('http://h:1'), false);
+  assert.equal(proxyHasCredentials('socks5://u:p@h:1'), false);
+  assert.equal(proxyHasCredentials(''), false);
+});
+
+test('setup downloads the runtime through a proxy whose credentials rotate on every CONNECT', { timeout: 60_000 }, async (t) => {
+  const release = await startReleaseMirror(t, { rotating: true });
+  if (!release) return;
+  const { proxy, tag } = release;
+  const current = () => proxy.urlFor(proxy.generation());
+
+  // PILOT_PROXY_CMD, and config.json "proxy_cmd": each of the three requests
+  // (manifest, release redirect, asset) runs it first.
+  for (const where of ['env', 'config']) {
+    const home = release.home(`rotating-${where}`);
+    const env = where === 'env' ? { PILOT_PROXY_CMD: proxy.command } : {};
+    if (where === 'config') {
+      mkdirSync(join(home, '.pilot'), { recursive: true });
+      writeFileSync(join(home, '.pilot', 'config.json'), JSON.stringify({ proxy_cmd: proxy.command }));
+    }
+    proxy.log.length = 0;
+    const result = await release.install(home, { proxyURL: current(), env });
+    assert.equal(result.ok, true, `${where}: ${result.error}`);
+    assert.equal(readFileSync(join(home, '.pilot', 'bin', '.pilot-version'), 'utf8'), `${tag}\n`);
+    assert.deepEqual(proxy.log, [
+      { authority: 'pilotprotocol.network:443', authorized: true },
+      { authority: 'github.com:443', authorized: true },
+      { authority: 'release-assets.githubusercontent.com:443', authorized: true },
+    ], where);
+  }
+
+  // Without a proxy command the launch-time credentials go stale after the
+  // first request.
+  proxy.log.length = 0;
+  const stale = await release.install(release.home('stale'), { proxyURL: current() });
+  assert.equal(stale.ok, false);
+  assert.match(stale.error, /refused CONNECT github\.com:443: HTTP 407/);
+  assert.doesNotMatch(stale.error, /rot\d|muse-agent/);
+});
+
 // show renders a proxy URL the way Go's url.URL.String does for the vectors
 // above: scheme://[user:password@]host.
 function show(url) {
@@ -639,7 +856,13 @@ function startServer(server) {
 
 // startConnectProxy mimics the Muse egress proxy: Basic proxy auth, CONNECT
 // only, port 443 only, routed by the requested hostname (never resolved).
-async function startConnectProxy(routes) {
+//
+// `credentials` returns the user:password the proxy accepts now; `before`
+// runs as a CONNECT arrives and `onAuthorized` after one is let through (a
+// rotating proxy changes the credentials there). `malformed` answers bad
+// credentials with bytes that are not HTTP, as the Meta Muse proxy's 407
+// reads to a client.
+async function startConnectProxy(routes, { credentials = () => CREDENTIALS, before = () => {}, onAuthorized = () => {}, malformed = false } = {}) {
   const log = [];
   const sockets = new Set();
   const server = http.createServer((req, res) => {
@@ -651,10 +874,12 @@ async function startConnectProxy(routes) {
     socket.on('close', () => sockets.delete(socket));
   });
   server.on('connect', (req, client, head) => {
-    const authorized = req.headers['proxy-authorization'] === `Basic ${Buffer.from(CREDENTIALS).toString('base64')}`;
+    before(log.length);
+    const authorized = req.headers['proxy-authorization'] === `Basic ${Buffer.from(credentials()).toString('base64')}`;
     log.push({ authority: req.url, authorized });
     const reply = (status, text) => client.end(`HTTP/1.1 ${status} ${text}\r\nContent-Length: 0\r\n\r\n`);
-    if (!authorized) return reply(407, 'Proxy Authentication Required');
+    if (!authorized) return malformed ? client.end('\u0000\u0001 not http\r\n\r\n') : reply(407, 'Proxy Authentication Required');
+    onAuthorized();
     const separator = req.url.lastIndexOf(':');
     const host = req.url.slice(0, separator);
     if (req.url.slice(separator + 1) !== '443') return reply(403, 'Forbidden');
@@ -680,6 +905,34 @@ async function startConnectProxy(routes) {
   };
 }
 
+// startRotatingProxy is a Muse-like proxy whose credentials rotate: with
+// rotateAfterConnect each set lets exactly one CONNECT through. The current
+// proxy URL is kept in a file, and `command` prints it the way a fresh
+// shell prints the sandbox's current $https_proxy.
+async function startRotatingProxy(t, routes, { rotateAfterConnect = false, rotateBefore = () => false, malformed = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'pilot-rotating-proxy-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'proxy-url');
+  let generation = 0;
+  let port;
+  const secret = (n) => `rot${n}/p@ss`;
+  const urlFor = (n) => `http://muse-agent:${encodeURIComponent(secret(n))}@127.0.0.1:${port}`;
+  const publish = () => writeFileSync(file, `${urlFor(generation)}\n`);
+  const rotate = () => {
+    generation += 1;
+    publish();
+  };
+  const proxy = await startConnectProxy(routes, {
+    credentials: () => `muse-agent:${secret(generation)}`,
+    before: (count) => { if (rotateBefore(count)) rotate(); },
+    onAuthorized: () => { if (rotateAfterConnect) rotate(); },
+    malformed,
+  });
+  port = new URL(proxy.url).port;
+  publish();
+  return { ...proxy, url: urlFor(0), file, command: `cat '${file}'`, urlFor, rotate, generation: () => generation };
+}
+
 function makeCertificate(t, names) {
   const dir = mkdtempSync(join(tmpdir(), 'pilot-proxy-pki-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -698,7 +951,7 @@ function makeCertificate(t, names) {
 // startReleaseMirror serves a fake release manifest, a GitHub release asset
 // redirect and the asset itself over TLS for the real production hostnames,
 // reachable only through the Muse-like proxy.
-async function startReleaseMirror(t) {
+async function startReleaseMirror(t, { rotating = false } = {}) {
   const key = runtimeKey();
   if (process.platform === 'win32' || !key) {
     t.skip('the runtime is published for macOS and Linux only');
@@ -730,11 +983,12 @@ async function startReleaseMirror(t) {
     }
   }));
   t.after(() => origin.close());
-  const proxy = await startConnectProxy({
+  const routes = {
     'pilotprotocol.network': origin.port,
     'github.com': origin.port,
     'release-assets.githubusercontent.com': origin.port,
-  });
+  };
+  const proxy = rotating ? await startRotatingProxy(t, routes, { rotateAfterConnect: true }) : await startConnectProxy(routes);
   t.after(() => proxy.close());
   writeFileSync(join(work, 'ca.pem'), pki.cert);
   return {
@@ -752,7 +1006,7 @@ async function startReleaseMirror(t) {
       mkdirSync(home);
       return home;
     },
-    install: (home, { proxyURL = proxy.url, requireProxy = false } = {}) => runRuntimeInstall(childEnv(home, proxyURL), 'ensurePilotRuntime', { requireProxy }),
+    install: (home, { proxyURL = proxy.url, requireProxy = false, env = {} } = {}) => runRuntimeInstall({ ...childEnv(home, proxyURL), ...env }, 'ensurePilotRuntime', { requireProxy }),
     upgrade: (home, { env = {} } = {}) => runRuntimeInstall({ ...childEnv(home, proxy.url), ...env }, 'upgradeRuntimeForProxy', {}),
   };
   function childEnv(home, proxyURL) {

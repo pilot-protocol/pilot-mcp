@@ -17,7 +17,7 @@ import { basename, join } from 'node:path';
 import process from 'node:process';
 import { URL } from 'node:url';
 import { daemonBinaryPath, pilotctlBinaryPath } from '../daemon-bridge.js';
-import { proxyAwareFetch } from '../netproxy.js';
+import { createProxyAwareFetch, proxyCommandFor } from '../netproxy.js';
 import { readPilotConfig } from './pilot-config.js';
 
 const DEFAULT_MANIFEST = 'https://pilotprotocol.network/.well-known/latest.json';
@@ -44,13 +44,13 @@ const MANAGED_RUNTIME = Object.freeze({
   }),
 });
 
-// Downloads go through proxyAwareFetch: in proxy-only sandboxes (Meta Muse)
-// the manifest and archive are fetched via the HTTPS_PROXY CONNECT tunnel,
-// and the archive is still checked against the pinned SHA-256 either way.
+// Downloads go through setupFetch: in proxy-only sandboxes (Meta Muse) the
+// manifest and archive are fetched via the HTTPS_PROXY CONNECT tunnel, and
+// the archive is still checked against the pinned SHA-256 either way.
 //
 // requireProxy asks for a runtime whose pilot-daemon supports -proxy; see
 // upgradeRuntimeForProxy for when the installed runtime may be replaced.
-export async function ensurePilotRuntime({ requireManaged = false, requireProxy = false, home = homedir(), fetchImpl = proxyAwareFetch, env = process.env } = {}) {
+export async function ensurePilotRuntime({ requireManaged = false, requireProxy = false, home = homedir(), env = process.env, fetchImpl = setupFetch({ home, env }) } = {}) {
   let existing = null;
   try {
     existing = pilotctlBinaryPath(env);
@@ -93,7 +93,7 @@ export async function ensurePilotRuntime({ requireManaged = false, requireProxy 
 //     before anything is replaced, actually lists -proxy.
 // Otherwise the installed runtime is kept. Resolves to
 // { upgraded, path, reason?, from?, to? }; `reason` is log-ready.
-export async function upgradeRuntimeForProxy({ home = homedir(), fetchImpl = proxyAwareFetch, env = process.env } = {}) {
+export async function upgradeRuntimeForProxy({ home = homedir(), env = process.env, fetchImpl = setupFetch({ home, env }) } = {}) {
   let existing;
   try {
     existing = pilotctlBinaryPath(env);
@@ -134,6 +134,16 @@ export async function upgradeRuntimeForProxy({ home = homedir(), fetchImpl = pro
     rmSync(stage, { recursive: true, force: true });
   }
   return { upgraded: true, path: perUser, from: installed, to: release.tag };
+}
+
+// setupFetch is the fetch setup downloads with: through the egress proxy,
+// with the credentials re-read from the proxy command (PILOT_PROXY_CMD,
+// config.json "proxy_cmd", or in a sandbox whose proxy carries credentials
+// a fresh bash) before every request, because a sandbox such as Meta Muse
+// rotates them while setup runs.
+export function setupFetch({ home = homedir(), env = process.env } = {}) {
+  const { config } = readPilotConfig(home);
+  return createProxyAwareFetch({ env, proxyCommand: proxyCommandFor(env, config ?? {})?.command });
 }
 
 // managedNodeReason names the evidence that this node runs under enterprise
@@ -255,15 +265,18 @@ export function supportsEgressProxy(daemon) {
 }
 
 // daemonFeatures reads a pilot-daemon's -h once and reports:
-//   known          it printed a flag list, so the other two can be trusted
+//   known          it printed a flag list, so the others can be trusted
 //   proxy          it understands -proxy
+//   proxyCmd       it understands -proxy-cmd ($PILOT_PROXY_CMD, config.json
+//                  "proxy_cmd"): it re-reads rotating proxy credentials
+//                  itself, every 60s and on a 407
 //   autoTransport  its -transport accepts 'auto', which its usage names; the
 //                  same check install.sh and pilotctl make. Such a runtime
 //                  picks udp or compat itself on every start, reads
 //                  "transport" in any case, and install.sh saves
 //                  "transport": "auto" for it.
 export function daemonFeatures(daemon) {
-  const none = { known: false, proxy: false, autoTransport: false };
+  const none = { known: false, proxy: false, proxyCmd: false, autoTransport: false };
   if (!daemon || !existsSync(daemon)) return none;
   const env = {};
   for (const name of ['PATH', 'HOME']) {
@@ -280,6 +293,7 @@ export function daemonFeatures(daemon) {
   return {
     known: lines.some((line) => /^\s+-[a-z][\w-]*(?:\s|$)/.test(line)),
     proxy: lines.some((line) => /^\s*-proxy\b(?!-)/.test(line)),
+    proxyCmd: lines.some((line) => /^\s*-proxy-cmd(?:\s|$)/.test(line)),
     autoTransport: transportUsage.includes("'auto'"),
   };
 }

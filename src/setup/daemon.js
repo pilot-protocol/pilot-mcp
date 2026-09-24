@@ -35,12 +35,17 @@
 // lower-case transports), and a value setup ignores is handed over empty,
 // because pilot-daemon (or pilotctl) would refuse to start with it, on any
 // transport. $PILOT_TRANSPORT counts only for a runtime that applies it.
+//
+// Where the proxy rotates its credentials (Meta Muse), the daemon gets a
+// proxy command (-proxy-cmd) or the pilot-sandbox egress relay; see
+// proxy-refresh.js.
 
 import { homedir } from 'node:os';
 import process from 'node:process';
 import { daemonBinaryPath, execPilotctl, pilotctlBinaryPath, pilotctlJSON } from '../daemon-bridge.js';
 import { daemonProxySetting, inspectProxy, parseProxySetting, redactProxyURL } from '../netproxy.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport, writePilotConfig } from './pilot-config.js';
+import { planProxyRefresh } from './proxy-refresh.js';
 import { daemonFeatures, managedNodeReason, upgradeRuntimeForProxy } from './runtime.js';
 
 export const PILOT_SANDBOX_SKILL_URL = 'https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox';
@@ -54,11 +59,11 @@ const COMPAT_REGISTRY = 'registry.pilotprotocol.network:443';
 // pilotctl passes these through when it forks pilot-daemon.
 export const DAEMON_PROXY_ENV = Object.freeze([
   'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy',
-  'NO_PROXY', 'no_proxy', 'PILOT_PROXY', 'PILOT_TRANSPORT', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'NO_PROXY', 'no_proxy', 'PILOT_PROXY', 'PILOT_PROXY_CMD', 'PILOT_TRANSPORT', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
 ]);
 
 // What setup assumes about a runtime it cannot ask (see daemonFeatures).
-const UNKNOWN_RUNTIME = Object.freeze({ known: false, proxy: false, autoTransport: false });
+const UNKNOWN_RUNTIME = Object.freeze({ known: false, proxy: false, proxyCmd: false, autoTransport: false });
 
 export async function installDaemon({
   transport,
@@ -68,6 +73,8 @@ export async function installDaemon({
   home = homedir(),
   log = defaultLog,
   upgradeRuntime = () => upgradeRuntimeForProxy({ home, env }),
+  host,
+  relay,
 }) {
   // The setup runtime stage has already installed a checksum-verified
   // pilot-daemon/pilotctl pair under ~/.pilot/bin. pilotctl uses the matching
@@ -75,6 +82,7 @@ export async function installDaemon({
   // starts the user process directly.
 
   let plan = { mode: 'default', transport, transportSource: 'probe', warnings: [] };
+  let refresh = { mode: 'none', env: {}, lines: [] };
   if (autoStart) {
     if (enterpriseControl) {
       const status = await execPilotctl(['daemon', 'status', '--check'], { capture: true });
@@ -123,8 +131,17 @@ export async function installDaemon({
     } else {
       for (const line of plan.compatHint ?? []) log(`  ${line}`);
     }
+    if (plan.mode === 'compat-proxy' || plan.mode === 'auto') {
+      const { config } = readPilotConfig(home);
+      refresh = await planProxyRefresh({ plan, features: plan.runtime(), env, config: config ?? {}, home, host, relay });
+      for (const line of refresh.lines) log(`  ${line}`);
+      if (refresh.save) saveProxyCommand(home, refresh.save, log);
+    }
     if (enterpriseControl) startArgs.push('--enterprise-control', enterpriseControl);
-    const started = await execPilotctl(startArgs, { capture: Boolean(enterpriseControl), env: daemonEnvironment(env, plan.runtime) });
+    const started = await execPilotctl(startArgs, {
+      capture: Boolean(enterpriseControl),
+      env: { ...daemonEnvironment(env, plan.runtime), ...refresh.env },
+    });
     if (enterpriseControl && started.code !== 0) {
       throw new Error(`managed daemon start failed: ${String(started.stderr || started.stdout).trim()}`);
     }
@@ -154,14 +171,14 @@ export async function installDaemon({
         reachable: false,
         trust_verified: false,
         hint: 'Daemon is up but trust handshake with list-agents did not complete. Most common cause: UDP blocked (try compat mode) or first-run registry propagation. Run `pilot-mcp doctor` and retry in 60s.',
-        ...egressSummary(plan),
+        ...egressSummary(plan, refresh),
       };
     }
     return {
       reachable: true,
       trust_verified: true,
       catalog_sample: result?.data,
-      ...egressSummary(plan),
+      ...egressSummary(plan, refresh),
     };
   } catch (err) {
     return {
@@ -169,7 +186,7 @@ export async function installDaemon({
       trust_verified: false,
       error: err.message,
       hint: 'Daemon is running but trust handshake with list-agents failed. Run `pilot-mcp doctor` for diagnostics.',
-      ...egressSummary(plan),
+      ...egressSummary(plan, refresh),
     };
   }
 }
@@ -429,6 +446,22 @@ function syncRecordedTransport(home, plan, log) {
   if (wanted && !theirs) log(`  Recorded "transport": "compat" in ${path}; setup removes it again once UDP works.`);
 }
 
+// saveProxyCommand saves the sandbox proxy command as config.json
+// "proxy_cmd", as install.sh does, so every later start of the daemon
+// (pilotctl, or a script passing -config) re-reads rotated credentials too.
+// A proxy_cmd already there is never replaced.
+function saveProxyCommand(home, command, log) {
+  const { path, config, error } = readPilotConfig(home);
+  if (!config) {
+    log(`  Could not read ${path} (${error}); "proxy_cmd" is not saved, so only this start re-reads the credentials.`);
+    return;
+  }
+  if (typeof config.proxy_cmd === 'string' && config.proxy_cmd.trim()) return;
+  config.proxy_cmd = command;
+  writePilotConfig(home, config);
+  log(`  Saved it as "proxy_cmd" in ${path}, so later starts re-read them too.`);
+}
+
 function daemonEnvironment(env, features) {
   const forwarded = {};
   for (const name of DAEMON_PROXY_ENV) {
@@ -442,13 +475,16 @@ function daemonEnvironment(env, features) {
 // default transport (udp) unless config.json, or $PILOT_TRANSPORT on a
 // runtime that applies it, chose one. "auto" means the daemon picks udp or
 // compat itself; `proxy` is then the one it uses while UDP is blocked.
-function egressSummary(plan) {
+// `proxy_refresh` says how rotating proxy credentials reach the daemon
+// (proxy-cmd, relay, or stale), when they can rotate.
+function egressSummary(plan, refresh = { mode: 'none' }) {
   let transport = 'udp';
   if (plan.mode === 'compat-proxy') transport = 'compat';
   else if (plan.transportSource !== 'probe' && plan.transport) transport = plan.transport;
   const summary = { transport };
   if (plan.mode === 'default' || !plan.proxy) return summary;
-  return { ...summary, proxy: redactProxyURL(plan.proxy), proxy_supported: plan.mode !== 'proxy-unsupported' };
+  const proxied = { ...summary, proxy: redactProxyURL(plan.proxy), proxy_supported: plan.mode !== 'proxy-unsupported' };
+  return refresh.mode === 'none' ? proxied : { ...proxied, proxy_refresh: refresh.mode };
 }
 
 function locatePilotctl(env) {
