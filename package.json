@@ -1,6 +1,6 @@
 {
   "name": "pilotprotocol-mcp",
-  "version": "0.2.13",
+  "version": "0.3.0",
   "mcpName": "io.github.pilot-protocol/pilot-mcp",
   "description": "Your agent's overlay network. MCP server exposing 436 Pilot specialist agents + P2P A2A messaging. One install configures every harness on your machine.",
   "type": "module",

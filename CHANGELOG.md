@@ -6,6 +6,8 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-24
+
 ### Fixed
 - `setup` runs in proxy-only agent sandboxes such as Meta Muse, as a normal
   user or as root and without systemd. The node reaches the Pilot network
