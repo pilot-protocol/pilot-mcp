@@ -301,7 +301,7 @@ test('setup downloads the runtime through the proxy and keeps the checksum gate'
 test('a per-user runtime without -proxy is upgraded through the proxy only to a newer release with -proxy', { timeout: 60_000 }, async (t) => {
   const release = await startReleaseMirror(t);
   if (!release) return;
-  const legacy = (name, tag, extra = () => {}) => {
+  const legacy = (name, tag) => {
     const home = release.home(name);
     const bin = join(home, '.pilot', 'bin');
     mkdirSync(bin, { recursive: true });
@@ -310,7 +310,6 @@ test('a per-user runtime without -proxy is upgraded through the proxy only to a 
       chmodSync(join(bin, binary), 0o755);
     }
     if (tag !== null) writeFileSync(join(bin, '.pilot-version'), `${tag}\n`);
-    extra(home);
     return home;
   };
   const daemonOf = (home) => readFileSync(join(home, '.pilot', 'bin', 'pilot-daemon'), 'utf8');
@@ -349,22 +348,16 @@ test('a per-user runtime without -proxy is upgraded through the proxy only to a 
     assert.equal(versionOf(home), tag, name);
   }
 
-  // Unknown or missing versions and managed nodes are never touched, and no
-  // request is made for them.
-  const managedControl = (home) => {
-    mkdirSync(join(home, '.pilot', 'managed'), { recursive: true });
-    writeFileSync(join(home, '.pilot', 'managed', 'enterprise-control.json'), '{}', { mode: 0o600 });
-  };
-  const managedConfig = (home) => writeFileSync(join(home, '.pilot', 'config.json'), JSON.stringify({ enterprise_control: '/secure/control.json' }));
-  for (const [name, tag, extra, reason] of [
-    ['untagged', null, undefined, /has no recorded version/],
-    ['dev', 'dev', undefined, /dev is not a release version/],
-    ['managed-tag', 'managed-runtime-v0.1.5', undefined, /managed \(runtime managed-runtime-v0\.1\.5\)/],
-    ['managed-control', 'v1.13.9', managedControl, /managed \(enterprise control attachment\)/],
-    ['managed-config', 'v1.13.9', managedConfig, /managed \(config\.json enterprise_control\)/],
+  // Unknown or missing versions are never touched, and no request is made
+  // for them. That includes the retired managed-runtime tags, which are not
+  // release versions.
+  for (const [name, tag, reason] of [
+    ['untagged', null, /has no recorded version/],
+    ['dev', 'dev', /dev is not a release version/],
+    ['retired-managed-tag', 'managed-runtime-v0.1.5', /managed-runtime-v0\.1\.5 is not a release version/],
   ]) {
     release.served.length = 0;
-    const home = legacy(name, tag, extra);
+    const home = legacy(name, tag);
     const kept = await release.upgrade(home);
     assert.equal(kept.ok, true, kept.error);
     assert.equal(kept.result.upgraded, false, name);
@@ -375,12 +368,6 @@ test('a per-user runtime without -proxy is upgraded through the proxy only to a 
     assert.equal(viaEnsureKept.ok, true, viaEnsureKept.error);
     assert.equal(daemonOf(home), LEGACY_DAEMON, name);
   }
-  release.served.length = 0;
-  const managedByEnv = legacy('managed-env', 'v1.13.9');
-  const envKept = await release.upgrade(managedByEnv, { env: { PILOT_ENTERPRISE_CONTROL: '/secure/control.json' } });
-  assert.equal(envKept.result.upgraded, false);
-  assert.match(envKept.result.reason, /managed \(PILOT_ENTERPRISE_CONTROL\)/);
-  assert.deepEqual(release.served, []);
 
   // A newer release whose daemon still lacks -proxy is checked in the
   // staging directory and discarded: the installed runtime stays in place.

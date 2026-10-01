@@ -1,12 +1,10 @@
-// PicoClaw: MCP plus its current JSON-RPC process-hook ABI. The process command
-// is a fixed argv array written by Pilot (never user-influenced shell text).
-// PicoClaw remains pre-1.0, so onboarding reports this as native but
-// experimental until a pinned upstream version passes the denial proof.
+// PicoClaw: register the Pilot MCP server and remove the process hook earlier
+// Pilot releases registered for the hosted control plane.
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { PILOT_PACKAGE_SPEC, pilotMcpServer } from './runtime.js';
+import { pilotMcpServer } from './runtime.js';
 
 export async function configure(options = {}) {
   const config = join(options.home ?? homedir(), '.picoclaw', 'config.json');
@@ -22,18 +20,18 @@ export async function configure(options = {}) {
   current.tools.mcp.enabled = true;
   current.tools.mcp.servers = current.tools.mcp.servers ?? {};
   current.tools.mcp.servers.pilot = pilotMcpServer({ enabled: true });
-  current.hooks = current.hooks ?? {};
-  current.hooks.enabled = true;
-  current.hooks.defaults = current.hooks.defaults ?? {};
-  current.hooks.defaults.interceptor_timeout_ms = current.hooks.defaults.interceptor_timeout_ms ?? 30000;
-  current.hooks.processes = current.hooks.processes ?? {};
-  current.hooks.processes.pilot = {
-    enabled: true,
-    priority: 10,
-    transport: 'stdio',
-    command: ['npx', '-y', PILOT_PACKAGE_SPEC, 'picoclaw-hook'],
-    intercept: ['before_tool', 'after_tool'],
-  };
+  // hooks.enabled and hooks.defaults are left as found: they also govern the
+  // user's own process hooks.
+  if (isPilotProcessHook(current.hooks?.processes?.pilot)) {
+    delete current.hooks.processes.pilot;
+    if (Object.keys(current.hooks.processes).length === 0) delete current.hooks.processes;
+  }
   writeFileSync(config, JSON.stringify(current, null, 2));
   return { skipped: false };
+}
+
+function isPilotProcessHook(entry) {
+  return Array.isArray(entry?.command)
+    && entry.command.includes('picoclaw-hook')
+    && entry.command.some((arg) => /^(?:pilot-mcp|pilotprotocol-mcp)(?:@|$)/.test(String(arg)));
 }

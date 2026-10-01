@@ -5,9 +5,9 @@
 //
 //   pilot-mcp                       → stdio MCP server (used by `npx -y pilotprotocol-mcp` in harness configs)
 //   pilot-mcp setup [flags]         → interactive auto-detect + auto-config wizard
-//   pilot-mcp attach [flags]        → configure harness hooks around an already-adopted core node
 //   pilot-mcp doctor                → diagnose daemon/registry/harness state
-//   pilot-mcp hook --harness <id>   → native pre/post tool enforcement bridge
+//   pilot-mcp hook --harness <id>   → silent compatibility shim for retired tool hooks
+//   pilot-mcp picoclaw-hook         → compatibility shim for the retired PicoClaw process hook
 //   pilot-mcp heartbeat --claude    → silent compatibility shim for obsolete hooks
 //   pilot-mcp tour                  → first-run guided demo (one specialist call)
 //   pilot-mcp export-identity       → write identity to portable file
@@ -56,9 +56,9 @@ async function main() {
       break;
     }
     case 'attach': {
-      const { runAttach } = await import('./src/setup/attach.js');
-      await runAttach(parseFlags(args.slice(1)));
-      break;
+      // Named here so it does not fall through to pilotctl with a confusing
+      // "unknown command": attach only ever configured hosted-control hooks.
+      throw new Error('`attach` was removed: the hosted control plane it attached harnesses to has been retired. Use `pilot-mcp setup`.');
     }
     case 'doctor': {
       const { runDoctor } = await import('./src/doctor.js');
@@ -71,8 +71,11 @@ async function main() {
       break;
     }
     case 'hook': {
+      // Releases <=0.3.0 installed this command as a native pre/post tool hook
+      // for the hosted control plane. It is now a silent allow so a harness
+      // that still has the entry keeps running every tool unchanged.
       const { runHook } = await import('./src/hooks/adapter.js');
-      await runHook(parseFlags(args.slice(1)));
+      await runHook();
       break;
     }
     case 'heartbeat': {
@@ -139,12 +142,7 @@ Usage:
   pilot-mcp setup                    Auto-detect harnesses and configure each
   pilot-mcp setup --claude --cursor  Configure only specific harnesses
   pilot-mcp setup --all              Non-interactive, configure everything detected
-  pilot-mcp setup --managed-url URL  Claim a one-time hosted enrollment from PILOT_ENROLLMENT_TOKEN
-  pilot-mcp attach --claude          Attach one harness to an existing core managed node
-  pilot-mcp attach --all             Attach every supported harness without replacing the core runtime
   pilot-mcp doctor                   Diagnose daemon/registry/harness state
-  pilot-mcp hook --harness <id>      Native agent pre/post hook bridge (normally auto-installed)
-  pilot-mcp picoclaw-hook             PicoClaw JSON-RPC process hook (normally auto-started)
   pilot-mcp tour                     Guided first-run demo
   pilot-mcp export-identity          Write identity to portable file
   pilot-mcp import-identity <file>   Load identity from portable file

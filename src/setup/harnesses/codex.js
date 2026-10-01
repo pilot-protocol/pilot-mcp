@@ -1,16 +1,15 @@
 // Codex CLI (OpenAI): write [mcp_servers.pilot] into ~/.codex/config.toml and
-// install the native PreToolUse/PostToolUse boundary in ~/.codex/hooks.json.
-// Codex requires users to review non-managed hook definitions in /hooks; an
-// administrator can deploy the same definition as a mandatory managed hook.
+// remove the hook entries earlier Pilot releases wrote into ~/.codex/hooks.json.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { hookCommand, isPilotHookCommand, PILOT_PACKAGE_SPEC } from './runtime.js';
+import { PILOT_PACKAGE_SPEC, removeGroupedPilotHooks } from './runtime.js';
 
 const HOME = homedir();
 const CONFIG = join(HOME, '.codex', 'config.toml');
 const HOOKS = join(HOME, '.codex', 'hooks.json');
+const RETIRED_HOOKS_DESCRIPTION = 'Optional local Codex hooks, including Pilot policy enforcement.';
 
 function pilotBlock() {
   return `[mcp_servers.pilot]\ncommand = "npx"\nargs = ["-y", "${PILOT_PACKAGE_SPEC}"]\n`;
@@ -24,7 +23,7 @@ export async function configure() {
     mkdirSync(dirname(CONFIG), { recursive: true });
     writeFileSync(CONFIG, pilotBlock());
   }
-  installHooks();
+  removeRetiredHooks();
 }
 
 export function upsertPilotMcpBlock(source) {
@@ -50,26 +49,17 @@ export function upsertPilotMcpBlock(source) {
   return retained.join('');
 }
 
-function installHooks() {
-  const current = existsSync(HOOKS) ? JSON.parse(readFileSync(HOOKS, 'utf8')) : {};
-  current.description = current.description ?? 'Optional local Codex hooks, including Pilot policy enforcement.';
-  current.hooks = current.hooks ?? {};
-  installHook(current.hooks, 'PreToolUse', 'pre');
-  installHook(current.hooks, 'PostToolUse', 'post');
-  writeFileSync(HOOKS, JSON.stringify(current, null, 2));
-}
-
-function installHook(hooks, event, phase) {
-  hooks[event] = hooks[event] ?? [];
-  const command = hookCommand('codex', phase);
-  const existing = hooks[event].flatMap((group) => group.hooks ?? []).find((hook) =>
-    isPilotHookCommand(hook.command, 'codex', phase)
-  );
-  if (existing) {
-    existing.command = command;
-  } else {
-    hooks[event].push({
-      hooks: [{ type: 'command', command, timeout: 30, statusMessage: phase === 'pre' ? 'Checking Pilot policy' : 'Reporting Pilot evidence' }],
-    });
+// Releases <=0.3.0 installed PreToolUse/PostToolUse commands for the hosted
+// control plane. Remove only those; when nothing else is left in a file
+// Pilot created, remove the file too.
+function removeRetiredHooks() {
+  if (!existsSync(HOOKS)) return;
+  const current = JSON.parse(readFileSync(HOOKS, 'utf8'));
+  if (!removeGroupedPilotHooks(current.hooks, ['PreToolUse', 'PostToolUse'], 'codex')) return;
+  if (current.description === RETIRED_HOOKS_DESCRIPTION) delete current.description;
+  if (Object.keys(current.hooks).length === 0 && Object.keys(current).length === 1) {
+    unlinkSync(HOOKS);
+    return;
   }
+  writeFileSync(HOOKS, JSON.stringify(current, null, 2));
 }

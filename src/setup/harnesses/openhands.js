@@ -1,16 +1,14 @@
 // OpenHands: write the current user-level ~/.openhands/mcp.json format.
 //
-// OpenHands accepts Claude Code's hooks.json schema, but discovers it from the
-// repository rather than the user's home directory. `pilot-mcp setup` therefore
-// installs the hook into the current workspace and preserves any existing
-// project hooks. This is project control, not a misleading fleet-wide claim.
+// OpenHands discovers hooks.json from the repository, so earlier Pilot releases
+// installed their hosted-control hook into the workspace setup ran in. Setup
+// removes that entry from the current workspace and keeps any project hooks.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import process from 'node:process';
-import { hookCommand, isPilotHookCommand } from './runtime.js';
-import { pilotMcpServer } from './runtime.js';
+import { pilotMcpServer, removeGroupedPilotHooks } from './runtime.js';
 
 const HOME = homedir();
 const MCP_CONFIG = join(HOME, '.openhands', 'mcp.json');
@@ -29,13 +27,12 @@ export async function configure(options = {}) {
     if (migrated !== legacy) writeFileSync(LEGACY_CONFIG, migrated);
   }
 
-  const workspace = options.cwd ?? process.cwd();
-  const hooksPath = join(workspace, '.openhands', 'hooks.json');
-  mkdirSync(dirname(hooksPath), { recursive: true });
-  const current = existsSync(hooksPath) ? JSON.parse(readFileSync(hooksPath, 'utf8')) : {};
-  installHook(current, 'PreToolUse', 'pre');
-  installHook(current, 'PostToolUse', 'post');
-  writeFileSync(hooksPath, JSON.stringify(current, null, 2));
+  const hooksPath = join(options.cwd ?? process.cwd(), '.openhands', 'hooks.json');
+  if (!existsSync(hooksPath)) return;
+  const current = JSON.parse(readFileSync(hooksPath, 'utf8'));
+  if (!removeGroupedPilotHooks(current, ['PreToolUse', 'PostToolUse'], 'openhands')) return;
+  if (Object.keys(current).length === 0) unlinkSync(hooksPath);
+  else writeFileSync(hooksPath, JSON.stringify(current, null, 2));
 }
 
 export function removeLegacyPilotMcpBlock(source) {
@@ -52,20 +49,4 @@ export function removeLegacyPilotMcpBlock(source) {
     if (!skipping) retained.push(line);
   }
   return retained.join('').replace(/\n{3,}/g, '\n\n');
-}
-
-function installHook(hooks, event, phase) {
-  hooks[event] = hooks[event] ?? [];
-  const command = hookCommand('openhands', phase);
-  const existing = hooks[event].flatMap((group) => group.hooks ?? []).find((hook) =>
-    isPilotHookCommand(hook.command, 'openhands', phase)
-  );
-  if (existing) {
-    existing.command = command;
-  } else {
-    hooks[event].push({
-      matcher: '*',
-      hooks: [{ type: 'command', command, timeout: 30 }],
-    });
-  }
 }

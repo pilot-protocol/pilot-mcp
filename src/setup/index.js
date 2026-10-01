@@ -9,7 +9,7 @@
 //   5. Install AND load the daemon service (launchd plist / systemd unit).
 //   6. Start daemon, wait for rendezvous registration, fetch pilot address.
 //   7. Auto-detect installed harnesses.
-//   8. For each detected harness: write its current MCP config and native policy hooks.
+//   8. For each detected harness: write its current MCP config.
 //   9. Print summary with pilot address and which harnesses were configured.
 //
 // Replaces the current ~16-step new-user journey with one command.
@@ -20,10 +20,6 @@
 // that, so cli.js exits non-zero and the summary names what does.
 
 import process from 'node:process';
-import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { execPilotctl } from '../daemon-bridge.js';
 import { inspectProxy, proxyCommandFor, proxyOnlySandbox } from '../netproxy.js';
 import { readPilotConfig } from './pilot-config.js';
 import { ensurePilotRuntime } from './runtime.js';
@@ -43,23 +39,15 @@ export async function runSetup(flags) {
     for (const warning of proxy.warnings) log(`  Warning: ${warning}`);
     const command = proxy.mode === 'off' ? null : proxyCommandFor(process.env, readPilotConfig().config ?? {});
     if (command) log(`  Proxy credentials: re-read with the proxy command (${command.source}) before every download.`);
-    const binary = await ensurePilotRuntime({ requireManaged: Boolean(opts.managedURL) });
+    const binary = await ensurePilotRuntime();
     log(`  Verified runtime: ${binary}`);
   });
 
-  if (opts.managedURL) {
-	await step('2', 'Hosted enrollment', async () => {
-      opts.enterpriseControl = await adoptManagedNode(opts);
-      process.env.PILOT_ENTERPRISE_CONTROL = opts.enterpriseControl;
-      log(`  Managed identity claimed and verified: ${opts.enterpriseControl}`);
-    });
-  }
-
-	await step(opts.managedURL ? '3' : '2', 'Identity', async () => {
-    await writeIdentity({ email: opts.email, hostname: opts.hostname, enterpriseControl: opts.enterpriseControl });
+  await step('2', 'Identity', async () => {
+    await writeIdentity({ email: opts.email, hostname: opts.hostname });
   });
 
-	await step(opts.managedURL ? '4' : '3', 'Transport', async () => {
+  await step('3', 'Transport', async () => {
     const forced = String(process.env.PILOT_TRANSPORT ?? '').trim().toLowerCase();
     // In a proxy-only sandbox the probe's datagrams would go around the
     // proxy: UDP is taken as blocked without sending any.
@@ -74,9 +62,9 @@ export async function runSetup(flags) {
     }
   });
 
-	await step(opts.managedURL ? '5' : '4', 'Daemon', async () => {
+  await step('4', 'Daemon', async () => {
     try {
-      const daemon = await installDaemon({ transport: opts.transport, autoStart: true, enterpriseControl: opts.enterpriseControl });
+      const daemon = await installDaemon({ transport: opts.transport, autoStart: true });
       opts.trust_verified = daemon.trust_verified === true;
       opts.address = daemon.address;
       opts.transport = daemon.transport ?? opts.transport;
@@ -89,18 +77,18 @@ export async function runSetup(flags) {
       opts.daemon_not_started = daemon.daemon_not_started === true;
       opts.compat_hint = daemon.compat_hint;
     } catch (error) {
-      // Harness attachment remains useful and is safe in unmanaged pass-through
-      // mode. Do not abort before writing adapters merely because the separate
-      // Pilot protocol runtime is absent; report the missing runtime explicitly.
+      // Writing the harness MCP configs is still useful without a running
+      // daemon. Do not abort before that merely because the separate Pilot
+      // protocol runtime is absent; report the missing runtime explicitly.
       opts.trust_verified = false;
       opts.daemon_error = error.message;
       log(`  Protocol runtime unavailable — ${error.message}`);
-      log('  Continuing with harness attachment in unmanaged pass-through mode.');
+      log('  Continuing with harness configuration.');
     }
   });
 
   let detected = [];
-	await step(opts.managedURL ? '6' : '5', 'Detect harnesses', async () => {
+  await step('5', 'Detect harnesses', async () => {
     detected = await detectHarnesses();
     if (opts.all) opts.harnesses = detected.map((h) => h.id);
     if (!opts.harnesses?.length) opts.harnesses = detected.map((h) => h.id);
@@ -109,7 +97,7 @@ export async function runSetup(flags) {
 
   const configured = [];
   const skipped = [];
-	await step(opts.managedURL ? '7' : '6', 'Configure harnesses', async () => {
+  await step('6', 'Configure harnesses', async () => {
     for (const id of opts.harnesses) {
       const h = detected.find((candidate) => candidate.id === id) ?? { id, name: id };
       const writer = harnesses[h.id];
@@ -133,7 +121,7 @@ export async function runSetup(flags) {
   log('');
   log('============================================');
   if (opts.network_unreachable) {
-    log('Harness adapters installed — THIS NODE CANNOT REACH THE PILOT NETWORK.');
+    log('Harnesses configured — THIS NODE CANNOT REACH THE PILOT NETWORK.');
     log(`UDP is blocked and the way out is the egress proxy ${opts.proxy}, but the`);
     log('installed pilot-daemon has no -proxy flag, so it cannot use that proxy.');
     if (opts.daemon_not_started) {
@@ -147,11 +135,10 @@ export async function runSetup(flags) {
     log('To bring this node online:');
     log(`  - now: follow the pilot-sandbox skill: ${PILOT_SANDBOX_SKILL_URL}`);
     log('  - or re-run `npx -y pilotprotocol-mcp setup` once a Pilot runtime whose pilot-daemon');
-    log('    has -proxy is released; setup installs it on a node that is not managed.');
+    log('    has -proxy is released; setup installs it.');
   } else if (opts.trust_verified !== true) {
     if (opts.daemon_error) {
-      log('Harness adapters installed — PROTOCOL RUNTIME NOT AVAILABLE.');
-      log('Unmanaged agents continue normally; managed control is not active.');
+      log('Harnesses configured — PROTOCOL RUNTIME NOT AVAILABLE.');
       log(`Runtime error: ${opts.daemon_error}`);
     } else if (opts.compat_hint?.length) {
       log('Pilot installed — the daemon registered, but it cannot reach peers yet.');
@@ -206,50 +193,23 @@ const PROXY_REFRESH_SUMMARY = {
 };
 
 async function resolveOptions(flags) {
+  // A flag that used to enrol the node must not silently become a plain
+  // install: say why it no longer does anything.
+  if (flags['managed-url'] !== undefined) {
+    throw new Error('--managed-url was removed: the hosted control plane has been retired. Run `pilot-mcp setup` without it.');
+  }
   // TODO: interactive prompts via @inquirer/prompts when TTY; env-var fallback otherwise.
   const opts = {
     email: flags.email ?? process.env.PILOT_EMAIL ?? null,
     hostname: flags.hostname ?? process.env.PILOT_HOSTNAME ?? null,
     all: flags.all ?? false,
     harnesses: [],
-    managedURL: flags['managed-url'] ?? process.env.PILOT_MANAGEMENT_URL ?? null,
-    enrollmentToken: process.env.PILOT_ENROLLMENT_TOKEN ?? null,
   };
   // Build harnesses list from flags like --claude --cursor --cline.
   for (const id of ['claude', 'cursor', 'cline', 'continue', 'openclaw', 'hermes', 'picoclaw', 'openhands', 'codex', 'gemini', 'junie', 'copilot']) {
     if (flags[id]) opts.harnesses.push(id);
   }
   return opts;
-}
-
-async function adoptManagedNode(opts) {
-  const defaultControl = join(homedir(), '.pilot', 'managed', 'enterprise-control.json');
-  if (existsSync(defaultControl)) {
-    return defaultControl;
-  }
-  if (!opts.enrollmentToken) {
-    throw new Error('PILOT_ENROLLMENT_TOKEN is required for first managed adoption');
-  }
-  const result = await execPilotctl(
-    ['--json', 'enterprise', 'adopt', '--endpoint', opts.managedURL],
-    { capture: true, env: { PILOT_ENROLLMENT_TOKEN: opts.enrollmentToken } },
-  );
-  delete process.env.PILOT_ENROLLMENT_TOKEN;
-  opts.enrollmentToken = null;
-  if (result.code !== 0) {
-    throw new Error(`managed enrollment failed: ${String(result.stderr || result.stdout).trim()}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(result.stdout);
-  } catch {
-    throw new Error('managed enrollment returned an invalid response');
-  }
-  const controlPath = parsed?.data?.control_path;
-  if (!controlPath || !existsSync(controlPath)) {
-    throw new Error('managed enrollment did not install a verified control attachment');
-  }
-  return controlPath;
 }
 
 function step(n, label, fn) {

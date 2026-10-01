@@ -1,22 +1,18 @@
-// Claude Code: prefer `claude mcp add` CLI; fall back to direct ~/.claude.json edit.
-//
-// Also installs a complete native tool boundary. PreToolUse runs before
-// Claude's permission-mode checks (including bypassPermissions), while the
-// success/failure post events attach the real result to the same Pilot trace.
+// Claude Code: register the Pilot MCP server in ~/.claude.json and clean up
+// the hook entries earlier Pilot releases wrote into ~/.claude/settings.json.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { hookCommand, isPilotHookCommand, pilotMcpServer } from './runtime.js';
+import { pilotMcpServer, removeGroupedPilotHooks } from './runtime.js';
 
 const HOME = homedir();
 const SETTINGS = join(HOME, '.claude', 'settings.json');
 const MCP_CONFIG = join(HOME, '.claude.json');
 
 export async function configure() {
-  mkdirSync(dirname(SETTINGS), { recursive: true });
   await registerMcp();
-  await installHook();
+  removeRetiredHooks();
 }
 
 async function registerMcp() {
@@ -40,21 +36,22 @@ async function registerMcp() {
   }
 }
 
-async function installHook() {
-  const current = existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, 'utf8')) : {};
-  current.hooks = current.hooks ?? {};
+// Releases <=0.3.0 installed PreToolUse/PostToolUse/PostToolUseFailure
+// commands for the hosted control plane, and releases <=0.2.5 a
+// UserPromptSubmit heartbeat. Both are retired; remove only those Pilot
+// commands while preserving all user and third-party hooks.
+function removeRetiredHooks() {
+  if (!existsSync(SETTINGS)) return;
+  const current = JSON.parse(readFileSync(SETTINGS, 'utf8'));
+  if (!current.hooks || typeof current.hooks !== 'object') return;
+  const before = JSON.stringify(current.hooks);
   removeObsoletePromptHook(current.hooks);
-  installToolHook(current.hooks, 'PreToolUse', 'pre');
-  installToolHook(current.hooks, 'PostToolUse', 'post');
-  installToolHook(current.hooks, 'PostToolUseFailure', 'post');
+  removeGroupedPilotHooks(current.hooks, ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'], 'claude');
+  if (JSON.stringify(current.hooks) === before) return;
+  if (Object.keys(current.hooks).length === 0) delete current.hooks;
   writeFileSync(SETTINGS, JSON.stringify(current, null, 2));
 }
 
-// Versions <=0.2.5 installed a UserPromptSubmit entry that invoked the
-// nonexistent `heartbeat --claude` command. Prompt events do not carry a tool
-// name and therefore cannot use the enforcement adapter, whose supported
-// phases are deliberately pre/post tool execution. Remove only that obsolete
-// Pilot command while preserving all user and third-party prompt hooks.
 export function removeObsoletePromptHook(hooks) {
   const groups = hooks.UserPromptSubmit;
   if (!Array.isArray(groups)) return;
@@ -69,19 +66,4 @@ export function removeObsoletePromptHook(hooks) {
 function isObsoletePromptCommand(command) {
   if (typeof command !== 'string') return false;
   return /(?:^|\s)(?:pilot-mcp|pilotprotocol-mcp)(?:@[^\s]+)?\s+heartbeat\s+--claude(?:\s|$)/.test(command);
-}
-
-function installToolHook(hooks, event, phase) {
-  hooks[event] = hooks[event] ?? [];
-  const command = hookCommand('claude', phase);
-  const existing = hooks[event].flatMap((group) => group.hooks ?? []).find((hook) =>
-    isPilotHookCommand(hook.command, 'claude', phase)
-  );
-  if (existing) {
-    existing.command = command;
-  } else {
-    hooks[event].push({
-      hooks: [{ type: 'command', command, timeout: 30, statusMessage: phase === 'pre' ? 'Checking Pilot policy' : 'Reporting Pilot evidence' }],
-    });
-  }
 }

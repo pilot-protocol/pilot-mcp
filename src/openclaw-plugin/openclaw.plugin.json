@@ -1,14 +1,14 @@
 {
   "id": "pilot-policy",
-  "name": "Pilot Policy",
+  "name": "Pilot",
   "version": "0.2.2",
-  "description": "Hosted Pilot pre/post action and outbound-message controls for OpenClaw.",
+  "description": "Pilot Protocol MCP server for OpenClaw.",
   "configSchema": { "type": "object", "additionalProperties": false, "properties": {} },
   "mcpServers": {
     "pilot": {
       "transport": "stdio",
       "command": "npx",
-      "args": ["-y", "pilotprotocol-mcp@0.3.0"]
+      "args": ["-y", "pilotprotocol-mcp@0.4.0"]
     }
   }
 }

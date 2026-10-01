@@ -1,8 +1,9 @@
-// OpenClaw: install and enable Pilot's native policy plugin. The plugin manifest
-// owns its MCP server definition, while runtime hooks enforce tools and outbound
-// messages before the host's side effect occurs.
+// OpenClaw: install and enable Pilot's plugin, whose manifest owns the Pilot
+// MCP server definition. The plugin keeps its historical `pilot-policy` id and
+// install directory so an existing linked install is refreshed in place; it no
+// longer registers any tool or message hook.
 
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -20,6 +21,8 @@ export async function configure(options = {}) {
   removeObsoleteMcpEntry(config);
   mkdirSync(join(home, '.pilot', 'integrations'), { recursive: true });
   cpSync(SOURCE_PLUGIN, installedPlugin, { recursive: true, force: true });
+  // cpSync does not delete: drop the hook evaluator a release <=0.3.0 left here.
+  rmSync(join(installedPlugin, 'evaluate.js'), { force: true });
   try {
     // No --force: OpenClaw rejects it alongside --link, and a linked install already
     // points at installedPlugin, which the cpSync above just refreshed.

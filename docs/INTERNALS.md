@@ -54,37 +54,35 @@ from (in order):
 
 If none exist, we surface an MCP error pointing at `pilot-mcp setup`.
 
-## Native action hooks complement MCP
+## Retired native hooks
 
-MCP governs only calls routed through Pilot's MCP tools. Where a harness offers
-native interception, setup also installs a pre/post action boundary so Pilot
-can evaluate the exact tool input before execution and retain the result after
-execution. In particular, Claude Code uses `PreToolUse`, `PostToolUse`, and
-`PostToolUseFailure` in `~/.claude/settings.json`.
+Releases <=0.3.0 installed a native pre/post tool hook in every harness that
+offered one (`pilot-mcp hook --harness <id> --phase pre|post`, PicoClaw's
+`pilot-mcp picoclaw-hook` process hook, and tool/message hooks in the OpenClaw
+plugin). They were the action boundary for Pilot's hosted control plane, which
+has been retired. The `attach` command, `setup --managed-url`, and the
+enterprise-control argument injection on `send-message`/`send-file` went with
+it.
 
-Releases <=0.2.5 briefly installed a `UserPromptSubmit` heartbeat command that
-never existed. Setup now removes only that obsolete Pilot entry, preserving
-unrelated prompt hooks. The CLI retains the exact historical
+What remains is deliberately small:
+
+- The `setup/harnesses/*.js` writers install the MCP config only, and remove
+  the hook entries Pilot wrote earlier. They match on the Pilot command itself,
+  so user and third-party hooks in the same file are left untouched, and a
+  file Pilot created is deleted once nothing else is in it.
+- `pilot-mcp hook …` and `pilot-mcp picoclaw-hook` stay as silent allows: exit
+  0, no output, no stdin read, no pilotctl, no network. A harness that has not
+  been reconfigured since an older `setup` or `attach` keeps running every
+  tool unchanged.
+- The OpenClaw plugin keeps its `pilot-policy` id and install directory so a
+  linked install is refreshed in place. Its manifest carries the Pilot MCP
+  server definition; it registers no hooks.
+
+Releases <=0.2.5 also installed a `UserPromptSubmit` heartbeat command in
+Claude Code. Setup removes only that obsolete Pilot entry, preserving
+unrelated prompt hooks, and the CLI retains the exact historical
 `heartbeat --claude` spelling as a silent compatibility shim so a running
 Claude process with cached settings cannot reject prompts before restart.
-
-Other harness boundaries include:
-- OpenHands: Claude-compatible hook JSON, discovered per repository from
-  `.openhands/hooks.json`; a user-home hook is not fleet-wide enforcement
-- PicoClaw: `hooks.processes.PreMessage` with `inject_output: true` — but ONLY
-  via a stable audited binary command (issue #2307 RCE class)
-- OpenClaw: `before_prompt_build` hook from the `@openclaw/pilot` extension
-  (which already exists in the OpenClaw monorepo)
-- Hermes: `pre_llm_call` from a Python plugin (`hermes-pilot`), injecting into
-  user message (cache-preserving — Hermes's deliberate design)
-- Cline: lifecycle hook from a TypeScript plugin (`pilot-cline`)
-- Cursor: NOT POSSIBLE today — `beforeSubmitPrompt` is block-only, the
-  `additional_context` field on `sessionStart` is a confirmed Cursor staff bug
-- Continue.dev / Codex / Junie IDE / Copilot: no per-turn injection surface;
-  MCP + AGENTS.md is the ceiling
-
-The `setup/harnesses/*.js` writers install both the MCP config AND (where
-applicable) the per-turn hook in one pass.
 
 ## Marketplace strategy
 

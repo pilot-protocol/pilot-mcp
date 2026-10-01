@@ -1,11 +1,11 @@
-// Cline: write cline_mcp_settings.json in VS Code per-user storage.
-// Also drops .clinerules/pilot.md since Cline #5033 (AGENTS.md support) is
-// still closed unmerged.
+// Cline: write cline_mcp_settings.json in the current ~/.cline location and,
+// when present, the legacy VS Code per-user storage. Also removes the global
+// hook shims earlier Pilot releases installed.
 
-import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
-import { hookCommand, isPilotHookCommand, pilotMcpServer } from './runtime.js';
+import { isPilotHookCommand, pilotMcpServer } from './runtime.js';
 
 const HOME = homedir();
 
@@ -28,36 +28,19 @@ export async function configure() {
     current.mcpServers.pilot = pilotMcpServer();
     writeFileSync(settings, JSON.stringify(current, null, 2));
   }
-  installNativeHook('PreToolUse', 'pre', platform());
-  installNativeHook('PostToolUse', 'post', platform());
+  removeRetiredHooks();
 }
 
-export function installNativeHook(event, phase, os = platform()) {
-  const directory = join(HOME, '.cline', 'hooks');
-  const target = join(directory, os === 'win32' ? `${event}.ps1` : event);
-  const marker = hookCommand('cline', phase);
-  const content = os === 'win32'
-    ? `& ${marker}\nexit $LASTEXITCODE\n`
-    : `#!/bin/sh\nexec ${marker}\n`;
-  if (existsSync(target)) {
-    const existing = readFileSync(target, 'utf8');
-    if (isPilotHookCommand(existing, 'cline', phase)) {
-      if (!existing.includes(marker)) writeFileSync(target, content, { mode: 0o700 });
-      if (os !== 'win32') chmodSync(target, 0o700);
-      removeOwnedCompatibilityHook(event, phase, os);
-      return;
+// Releases <=0.3.0 wrote PreToolUse/PostToolUse shims that exec'd the retired
+// hosted-control hook. Delete a shim only when it is unmistakably Pilot's; a
+// user's own hook at the same path is left untouched.
+export function removeRetiredHooks(home = HOME) {
+  for (const directory of [join(home, '.cline', 'hooks'), join(home, 'Documents', 'Cline', 'Hooks')]) {
+    for (const event of ['PreToolUse', 'PostToolUse']) {
+      for (const target of [join(directory, event), join(directory, `${event}.ps1`)]) {
+        if (!existsSync(target)) continue;
+        if (isPilotHookCommand(readFileSync(target, 'utf8'), 'cline')) unlinkSync(target);
+      }
     }
-    throw new Error(`Cline already has a global ${event} hook at ${target}; install Pilot as a workspace hook or compose the scripts explicitly`);
   }
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(target, content, { mode: 0o700 });
-  if (os !== 'win32') chmodSync(target, 0o700);
-  removeOwnedCompatibilityHook(event, phase, os);
-}
-
-function removeOwnedCompatibilityHook(event, phase, os) {
-  const legacy = join(HOME, 'Documents', 'Cline', 'Hooks', os === 'win32' ? `${event}.ps1` : event);
-  if (!existsSync(legacy)) return;
-  const source = readFileSync(legacy, 'utf8');
-  if (isPilotHookCommand(source, 'cline', phase)) unlinkSync(legacy);
 }

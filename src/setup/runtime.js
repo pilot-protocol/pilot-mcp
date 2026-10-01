@@ -4,7 +4,6 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -22,27 +21,6 @@ import { readPilotConfig } from './pilot-config.js';
 
 const DEFAULT_MANIFEST = 'https://pilotprotocol.network/.well-known/latest.json';
 const MAX_RUNTIME_ARCHIVE_BYTES = 128 * 1024 * 1024;
-const MANAGED_RUNTIME = Object.freeze({
-  tag: 'managed-runtime-v0.1.5',
-  platforms: Object.freeze({
-    'darwin-amd64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-darwin-amd64.tar.gz',
-      sha256: '0d8bbda818bbfa1df9544fe114353eca097d3f7b7e356c4c5ceac1eaaf3f6d63',
-    }),
-    'darwin-arm64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-darwin-arm64.tar.gz',
-      sha256: '9df13081c5340f24c18c7941ad964c7c8c67b64d0f7a7fe98eee5043ee2fe915',
-    }),
-    'linux-amd64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-linux-amd64.tar.gz',
-      sha256: '432c04cd27b66e422b5d50778a7f7c220cd20b248348d2fcbad7e0a13e4de498',
-    }),
-    'linux-arm64': Object.freeze({
-      url: 'https://github.com/pilot-protocol/pilotprotocol/releases/download/managed-runtime-v0.1.5/pilot-linux-arm64.tar.gz',
-      sha256: 'ce873cc9838a7845956028050358f66a33f87af7c8983d2e63065d89104c2181',
-    }),
-  }),
-});
 
 // Downloads go through setupFetch: in proxy-only sandboxes (Meta Muse) the
 // manifest and archive are fetched via the HTTPS_PROXY CONNECT tunnel, and
@@ -50,22 +28,20 @@ const MANAGED_RUNTIME = Object.freeze({
 //
 // requireProxy asks for a runtime whose pilot-daemon supports -proxy; see
 // upgradeRuntimeForProxy for when the installed runtime may be replaced.
-export async function ensurePilotRuntime({ requireManaged = false, requireProxy = false, home = homedir(), env = process.env, fetchImpl = setupFetch({ home, env }) } = {}) {
+export async function ensurePilotRuntime({ requireProxy = false, home = homedir(), env = process.env, fetchImpl = setupFetch({ home, env }) } = {}) {
   let existing = null;
   try {
     existing = pilotctlBinaryPath(env);
   } catch {
     // A first install is expected not to have a runtime yet.
   }
-  if (existing
-    && (!requireManaged || supportsManagedAdoption(existing))
-    && (!requireProxy || supportsEgressProxy(daemonBinaryPath(existing, env)))) return existing;
+  if (existing && (!requireProxy || supportsEgressProxy(daemonBinaryPath(existing, env)))) return existing;
 
-  if (requireProxy && !requireManaged && existing) {
+  if (requireProxy && existing) {
     return (await upgradeRuntimeForProxy({ home, fetchImpl, env })).path ?? existing;
   }
 
-  const release = requireManaged ? managedRuntimeRelease() : await latestRelease(fetchImpl, env);
+  const release = await latestRelease(fetchImpl, env);
   const archive = await downloadRelease(fetchImpl, release);
   const stage = stageRuntime(home, archive);
   try {
@@ -74,19 +50,13 @@ export async function ensurePilotRuntime({ requireManaged = false, requireProxy 
     rmSync(stage, { recursive: true, force: true });
   }
 
-  const installed = join(home, '.pilot', 'bin', 'pilotctl');
-  if (requireManaged && !supportsManagedAdoption(installed)) {
-    throw new Error(`Pilot ${release.tag} does not contain hosted adoption support`);
-  }
-  return installed;
+  return join(home, '.pilot', 'bin', 'pilotctl');
 }
 
 // upgradeRuntimeForProxy replaces the installed runtime with one whose
 // pilot-daemon supports -proxy, and only when all of these hold:
 //   - the runtime is the per-user one setup manages (~/.pilot/bin); a
 //     runtime installed elsewhere (brew, $PATH, PILOTCTL_BIN) is left alone;
-//   - the node is not managed: a pinned enterprise runtime is never swapped
-//     for the public release (see managedNodeReason);
 //   - the installed version is known and the latest stable release is
 //     strictly newer, so this never downgrades (for example a beta);
 //   - the new release's pilot-daemon, checked in the staging directory
@@ -106,10 +76,6 @@ export async function upgradeRuntimeForProxy({ home = homedir(), env = process.e
   const perUser = join(home, '.pilot', 'bin', 'pilotctl');
   if (existing !== perUser) {
     return { upgraded: false, path: existing, reason: `${existing} was not installed by setup, so setup does not replace it` };
-  }
-  const managed = managedNodeReason({ home, env });
-  if (managed) {
-    return { upgraded: false, path: existing, reason: `this node is managed (${managed}), and its pinned runtime is never replaced` };
   }
   const installed = installedRuntimeTag(home);
   if (!parseVersionTag(installed)) {
@@ -144,25 +110,6 @@ export async function upgradeRuntimeForProxy({ home = homedir(), env = process.e
 export function setupFetch({ home = homedir(), env = process.env } = {}) {
   const { config } = readPilotConfig(home);
   return createProxyAwareFetch({ env, proxyCommand: proxyCommandFor(env, config ?? {})?.command });
-}
-
-// managedNodeReason names the evidence that this node runs under enterprise
-// management, or returns null. Any one of them pins the runtime: a managed
-// runtime tag, the owner-only control attachment, an enterprise_control key
-// in config.json, or PILOT_ENTERPRISE_CONTROL.
-export function managedNodeReason({ home = homedir(), env = process.env } = {}) {
-  const tag = installedRuntimeTag(home);
-  if (tag.startsWith('managed-runtime-')) return `runtime ${tag}`;
-  try {
-    lstatSync(join(home, '.pilot', 'managed', 'enterprise-control.json'));
-    return 'enterprise control attachment';
-  } catch {
-    // Not attached.
-  }
-  if (String(env.PILOT_ENTERPRISE_CONTROL ?? '').trim()) return 'PILOT_ENTERPRISE_CONTROL';
-  const { config } = readPilotConfig(home);
-  if (config && String(config.enterprise_control ?? '').trim()) return 'config.json enterprise_control';
-  return null;
 }
 
 // compareVersionTags orders release tags by semantic-version precedence
@@ -245,16 +192,6 @@ function installStagedRuntime(stage, home, tag) {
   writeFileSync(join(binDirectory, '.pilot-version'), `${tag}\n`, { mode: 0o600 });
 }
 
-export function supportsManagedAdoption(binary) {
-  if (!binary || !existsSync(binary)) return false;
-  const environment = { ...process.env };
-  delete environment.PILOT_ENROLLMENT_TOKEN;
-  const probe = spawnSync(binary, ['--json', 'enterprise', 'adopt', '--endpoint', 'https://management.invalid'], {
-    encoding: 'utf8', env: environment, timeout: 5_000,
-  });
-  return `${probe.stdout ?? ''}\n${probe.stderr ?? ''}`.includes('PILOT_ENROLLMENT_TOKEN');
-}
-
 // supportsEgressProxy reports whether a pilot-daemon understands -proxy,
 // i.e. can reach the registry and beacon through HTTPS_PROXY. Go's flag
 // package lists every flag on its own line as "  -name type" under -h.
@@ -323,13 +260,6 @@ export function validateRuntimeManifest(manifest, platform = process.platform, a
     throw new Error(`Pilot release manifest has an invalid runtime for ${key}`);
   }
   return { tag, url: parsed.toString(), sha256 };
-}
-
-export function managedRuntimeRelease(platform = process.platform, arch = process.arch) {
-  const key = runtimePlatformKey(platform, arch);
-  const release = MANAGED_RUNTIME.platforms[key];
-  if (!release) throw new Error(`Pilot does not publish a managed runtime for ${platform}/${arch}`);
-  return { tag: MANAGED_RUNTIME.tag, ...release };
 }
 
 function runtimePlatformKey(platform, arch) {

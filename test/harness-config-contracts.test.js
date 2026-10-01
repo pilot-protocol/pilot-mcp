@@ -22,7 +22,7 @@ function writeJSON(path, value) {
   writeFileSync(path, JSON.stringify(value, null, 2));
 }
 
-test('Claude separates user MCP registration from hook settings and migrates stale entries', () => {
+test('Claude registers MCP in ~/.claude.json, migrates stale entries, and removes only retired Pilot hooks', () => {
   const home = mkdtempSync(join(tmpdir(), 'pilot-claude-contract-'));
   const settingsPath = join(home, '.claude', 'settings.json');
   writeJSON(settingsPath, {
@@ -33,33 +33,81 @@ test('Claude separates user MCP registration from hook settings and migrates sta
     },
     hooks: {
       UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.2.5 heartbeat --claude' }] }],
+      PreToolUse: [
+        { hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness claude --phase pre', timeout: 30 }] },
+        { matcher: 'Bash', hooks: [
+          { type: 'command', command: 'customer-pre-hook' },
+          { type: 'command', command: 'npx -y pilotprotocol-mcp@0.2.13 hook --harness claude --phase pre' },
+        ] },
+      ],
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness claude --phase post', timeout: 30 }] }],
+      PostToolUseFailure: [{ hooks: [{ type: 'command', command: 'pilot-mcp hook --harness claude --phase post' }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'customer-stop-hook' }] }],
     },
   });
   configureInHome('claude', home);
 
   const mcp = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
-  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.3.0']);
+  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.4.0']);
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
   assert.equal(settings.theme, 'dark');
   assert.deepEqual(settings.mcpServers, { customer: { command: 'customer-mcp' } });
-  assert.equal(settings.hooks.UserPromptSubmit, undefined);
-  assert.equal(settings.hooks.PreToolUse.length, 1);
-  assert.equal(settings.hooks.PostToolUse.length, 1);
-  assert.equal(settings.hooks.PostToolUseFailure.length, 1);
+  assert.deepEqual(settings.hooks, {
+    PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'customer-pre-hook' }] }],
+    Stop: [{ hooks: [{ type: 'command', command: 'customer-stop-hook' }] }],
+  });
 });
 
-test('Gemini uses current MCP and BeforeTool/AfterTool user settings idempotently', () => {
+test('Claude setup leaves settings.json alone when it holds no Pilot hook, and drops an emptied hooks map', () => {
+  const untouched = mkdtempSync(join(tmpdir(), 'pilot-claude-untouched-'));
+  const untouchedPath = join(untouched, '.claude', 'settings.json');
+  const source = '{\n    "theme": "dark",\n    "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "customer-stop-hook" }] }] }\n}\n';
+  mkdirSync(dirname(untouchedPath), { recursive: true });
+  writeFileSync(untouchedPath, source);
+  configureInHome('claude', untouched);
+  assert.equal(readFileSync(untouchedPath, 'utf8'), source);
+
+  const fresh = mkdtempSync(join(tmpdir(), 'pilot-claude-fresh-'));
+  configureInHome('claude', fresh);
+  assert.equal(existsSync(join(fresh, '.claude', 'settings.json')), false);
+
+  const onlyPilot = mkdtempSync(join(tmpdir(), 'pilot-claude-only-'));
+  const onlyPath = join(onlyPilot, '.claude', 'settings.json');
+  writeJSON(onlyPath, {
+    theme: 'dark',
+    hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness claude --phase pre' }] }] },
+  });
+  configureInHome('claude', onlyPilot);
+  assert.deepEqual(JSON.parse(readFileSync(onlyPath, 'utf8')), { theme: 'dark' });
+});
+
+test('Gemini writes current MCP user settings idempotently and removes only retired Pilot hooks', () => {
   const home = mkdtempSync(join(tmpdir(), 'pilot-gemini-contract-'));
   const settingsPath = join(home, '.gemini', 'settings.json');
-  writeJSON(settingsPath, { mcpServers: { customer: { command: 'customer-mcp' } }, hooks: {} });
+  writeJSON(settingsPath, {
+    mcpServers: { customer: { command: 'customer-mcp' } },
+    hooksConfig: { enabled: true },
+    hooks: {
+      BeforeTool: [
+        { matcher: '.*', sequential: true, hooks: [{ type: 'command', name: 'pilot-pre-tool', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness gemini --phase pre', timeout: 30000 }] },
+        { matcher: 'shell', hooks: [{ type: 'command', command: 'customer-hook' }] },
+      ],
+      AfterTool: [{ matcher: '.*', sequential: true, hooks: [{ type: 'command', name: 'pilot-post-tool', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness gemini --phase post', timeout: 30000 }] }],
+    },
+  });
   configureInHome('gemini', home);
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-  assert.deepEqual(settings.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.3.0']);
+  assert.deepEqual(settings.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.4.0']);
   assert.equal(settings.mcpServers.customer.command, 'customer-mcp');
   assert.equal(settings.hooksConfig.enabled, true);
-  assert.equal(settings.hooks.BeforeTool.length, 1);
-  assert.equal(settings.hooks.AfterTool.length, 1);
-  assert.equal(settings.hooks.BeforeTool[0].hooks[0].timeout, 30000);
+  assert.deepEqual(settings.hooks, {
+    BeforeTool: [{ matcher: 'shell', hooks: [{ type: 'command', command: 'customer-hook' }] }],
+  });
+
+  const fresh = mkdtempSync(join(tmpdir(), 'pilot-gemini-fresh-'));
+  configureInHome('gemini', fresh);
+  const created = JSON.parse(readFileSync(join(fresh, '.gemini', 'settings.json'), 'utf8'));
+  assert.deepEqual(Object.keys(created), ['mcpServers']);
 });
 
 test('Continue merges Pilot into config.yaml and removes only its obsolete duplicate block', () => {
@@ -75,12 +123,12 @@ test('Continue merges Pilot into config.yaml and removes only its obsolete dupli
   const config = parse(source);
   assert.match(source, /# customer config/);
   assert.equal(config.mcpServers.filter((entry) => entry.name === 'Pilot').length, 1);
-  assert.deepEqual(config.mcpServers.find((entry) => entry.name === 'Pilot').args, ['-y', 'pilotprotocol-mcp@0.3.0']);
+  assert.deepEqual(config.mcpServers.find((entry) => entry.name === 'Pilot').args, ['-y', 'pilotprotocol-mcp@0.4.0']);
   assert.equal(config.mcpServers.find((entry) => entry.name === 'Customer').command, 'customer-mcp');
   assert.equal(existsSync(legacyPath), false);
 });
 
-test('OpenHands migrates pre-1.0 TOML MCP config and installs project hooks', () => {
+test('OpenHands migrates pre-1.0 TOML MCP config and removes only retired Pilot project hooks', () => {
   const home = mkdtempSync(join(tmpdir(), 'pilot-openhands-contract-'));
   const workspace = join(home, 'workspace');
   mkdirSync(workspace, { recursive: true });
@@ -88,40 +136,86 @@ test('OpenHands migrates pre-1.0 TOML MCP config and installs project hooks', ()
   mkdirSync(dirname(legacyPath), { recursive: true });
   writeFileSync(legacyPath, '[core]\nmodel = "customer"\n\n[mcp.stdio_servers.pilot]\ncommand = "npx"\nargs = ["-y", "pilotprotocol-mcp@0.2.11"]\n\n[other]\nenabled = true\n');
   writeJSON(join(home, '.openhands', 'mcp.json'), { mcpServers: { customer: { command: 'customer-mcp' } } });
+  writeJSON(join(workspace, '.openhands', 'hooks.json'), {
+    PreToolUse: [
+      { matcher: '*', hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness openhands --phase pre', timeout: 30 }] },
+      { matcher: 'bash', hooks: [{ type: 'command', command: 'project-hook' }] },
+    ],
+    PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness openhands --phase post', timeout: 30 }] }],
+  });
   configureInHome('openhands', home, { cwd: workspace });
 
   const mcp = JSON.parse(readFileSync(join(home, '.openhands', 'mcp.json'), 'utf8'));
-  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.3.0']);
+  assert.deepEqual(mcp.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.4.0']);
   assert.equal(mcp.mcpServers.customer.command, 'customer-mcp');
   const legacy = readFileSync(legacyPath, 'utf8');
   assert.doesNotMatch(legacy, /mcp\.stdio_servers\.pilot/);
   assert.match(legacy, /\[core\]/);
   assert.match(legacy, /\[other\]/);
   const hooks = JSON.parse(readFileSync(join(workspace, '.openhands', 'hooks.json'), 'utf8'));
-  assert.equal(hooks.PreToolUse.length, 1);
-  assert.equal(hooks.PostToolUse.length, 1);
+  assert.deepEqual(hooks, { PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: 'project-hook' }] }] });
+
+  // A workspace without hooks is not given a .openhands directory, and a hook
+  // file that held only Pilot's entries is removed.
+  const clean = join(home, 'clean-workspace');
+  mkdirSync(clean, { recursive: true });
+  configureInHome('openhands', home, { cwd: clean });
+  assert.equal(existsSync(join(clean, '.openhands')), false);
+  const owned = join(home, 'owned-workspace');
+  writeJSON(join(owned, '.openhands', 'hooks.json'), {
+    PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness openhands --phase pre', timeout: 30 }] }],
+  });
+  configureInHome('openhands', home, { cwd: owned });
+  assert.equal(existsSync(join(owned, '.openhands', 'hooks.json')), false);
 });
 
-test('Codex upgrades its owned TOML table without duplicating user configuration', () => {
+test('Codex upgrades its owned TOML table without duplicating user configuration and removes retired Pilot hooks', () => {
   const home = mkdtempSync(join(tmpdir(), 'pilot-codex-contract-'));
   const configPath = join(home, '.codex', 'config.toml');
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, 'model = "customer"\n\n[mcp_servers.pilot]\ncommand = "npx"\nargs = ["-y", "pilotprotocol-mcp@0.2.8"]\n\n[mcp_servers.customer]\ncommand = "customer-mcp"\n');
+  const hooksPath = join(home, '.codex', 'hooks.json');
+  writeJSON(hooksPath, {
+    description: 'Optional local Codex hooks, including Pilot policy enforcement.',
+    hooks: {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness codex --phase pre', timeout: 30 }] }],
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness codex --phase post', timeout: 30 }] }],
+    },
+  });
   configureInHome('codex', home);
   const config = readFileSync(configPath, 'utf8');
   assert.equal(config.match(/\[mcp_servers\.pilot\]/g)?.length, 1);
-  assert.match(config, /pilotprotocol-mcp@0\.3\.0/);
+  assert.match(config, /pilotprotocol-mcp@0\.4\.0/);
   assert.match(config, /\[mcp_servers\.customer\]/);
   assert.match(config, /model = "customer"/);
-  const hooks = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
-  assert.equal(hooks.hooks.PreToolUse.length, 1);
-  assert.equal(hooks.hooks.PostToolUse.length, 1);
+  assert.equal(existsSync(hooksPath), false);
+
+  const mixed = mkdtempSync(join(tmpdir(), 'pilot-codex-mixed-'));
+  const mixedHooks = join(mixed, '.codex', 'hooks.json');
+  writeJSON(mixedHooks, {
+    description: 'Customer hooks',
+    hooks: {
+      PreToolUse: [
+        { hooks: [{ type: 'command', command: 'npx -y pilotprotocol-mcp@0.3.0 hook --harness codex --phase pre', timeout: 30 }] },
+        { hooks: [{ type: 'command', command: 'customer-hook' }] },
+      ],
+    },
+  });
+  configureInHome('codex', mixed);
+  assert.deepEqual(JSON.parse(readFileSync(mixedHooks, 'utf8')), {
+    description: 'Customer hooks',
+    hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'customer-hook' }] }] },
+  });
+
+  const fresh = mkdtempSync(join(tmpdir(), 'pilot-codex-fresh-'));
+  configureInHome('codex', fresh);
+  assert.equal(existsSync(join(fresh, '.codex', 'hooks.json')), false);
 });
 
 test('Junie writes the shared CLI and IDE user MCP location', () => {
   const home = mkdtempSync(join(tmpdir(), 'pilot-junie-contract-'));
   configureInHome('junie', home);
   const config = JSON.parse(readFileSync(join(home, '.junie', 'mcp', 'mcp.json'), 'utf8'));
-  assert.deepEqual(config.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.3.0']);
+  assert.deepEqual(config.mcpServers.pilot.args, ['-y', 'pilotprotocol-mcp@0.4.0']);
   assert.equal(existsSync(join(home, '.junie', 'config.json')), false);
 });

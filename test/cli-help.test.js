@@ -21,6 +21,32 @@ test('help does not advertise the HTTP transport', async () => {
   assert.match(stdout, /Start stdio MCP server/);
 });
 
+test('help does not advertise the retired hosted control plane', async () => {
+  const { stdout } = await run(process.execPath, [cli, '--help']);
+  assert.doesNotMatch(stdout, /attach|managed|enrollment|hook/i);
+});
+
+test('attach and --managed-url say they were removed instead of reaching pilotctl', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pilot-cli-retired-'));
+  const marker = join(home, 'pilotctl-was-called');
+  const binary = join(home, 'pilotctl');
+  writeFileSync(binary, `#!/bin/sh\n: > ${JSON.stringify(marker)}\n`);
+  chmodSync(binary, 0o700);
+  const env = { ...process.env, HOME: home, PILOTCTL_BIN: binary };
+  for (const args of [['attach', '--claude'], ['setup', '--managed-url', 'https://management.example']]) {
+    await assert.rejects(
+      run(process.execPath, [cli, ...args], { env }),
+      (err) => {
+        assert.strictEqual(err.code, 1);
+        assert.match(err.stderr, /was removed: the hosted control plane/);
+        return true;
+      },
+    );
+  }
+  assert.equal(existsSync(marker), false);
+  assert.equal(existsSync(join(home, '.pilot')), false);
+});
+
 test('advertised doctor and tour commands execute against the packaged runtime bridge', async () => {
   const home = mkdtempSync(join(tmpdir(), 'pilot-cli-contract-'));
   const binary = join(home, 'pilotctl');
@@ -30,7 +56,7 @@ test('advertised doctor and tour commands execute against the packaged runtime b
   const doctor = await run(process.execPath, [cli, 'doctor', '--json'], { env });
   const report = JSON.parse(doctor.stdout);
   assert.equal(report.runtime.ok, true);
-  assert.equal(report.management.attached, false);
+  assert.equal('management' in report, false);
   const tour = await run(process.execPath, [cli, 'tour'], { env });
   assert.match(tour.stdout, /weather\.test/);
 });

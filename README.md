@@ -101,7 +101,7 @@ npx -y pilotprotocol-mcp setup
 Or per-harness manual:
 
 ```bash
-# Claude Code — user MCP lives in ~/.claude.json; hooks live in ~/.claude/settings.json
+# Claude Code — user MCP lives in ~/.claude.json
 claude mcp add --transport stdio pilot -- npx -y pilotprotocol-mcp
 
 # Cursor — add to ~/.cursor/mcp.json
@@ -139,7 +139,7 @@ args = ["-y", "pilotprotocol-mcp"]
 
 # Junie CLI/IDE — add standard MCP JSON to ~/.junie/mcp/mcp.json
 
-# OpenClaw — setup installs and enables the Pilot Policy plugin
+# OpenClaw — setup installs and enables the Pilot plugin (id `pilot-policy`), which carries the MCP server
 openclaw plugins inspect pilot-policy --runtime --json
 ```
 
@@ -207,8 +207,8 @@ In detail:
   when the installed `pilot-daemon` predates it.
 - An older per-user runtime (`~/.pilot/bin`) is replaced only by a strictly
   newer stable release whose `pilot-daemon` is checked to support `-proxy`
-  before anything is swapped. A managed node's pinned runtime, a runtime of
-  unknown version, and a runtime installed elsewhere are never replaced.
+  before anything is swapped. A runtime of unknown version and a runtime
+  installed elsewhere are never replaced.
   Otherwise setup keeps the runtime and points at the
   [pilot-sandbox skill](https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox).
   Outside a proxy-only sandbox it still starts that daemon, since some hosts
@@ -268,17 +268,13 @@ In detail:
   proxy or transport setting that is ignored or refused, and the recorded
   transport.
 
-## Privacy and optional management
+## Privacy
 
 - All overlay traffic flows **P2P over encrypted UDP** (AES-256-GCM, X25519 key exchange, Ed25519 identity).
-- An unmanaged node does not upload tool calls and every installed policy hook
-  is a zero-side-effect pass-through.
+- `pilot-mcp` does not upload tool calls and installs no tool hooks. Setup
+  removes the hook entries releases <=0.3.0 wrote into harness settings.
 - Specialist queries route through the Pilot rendezvous server (NAT-traversal coordinator) but the **payload is end-to-end encrypted**; the rendezvous can see who is talking to whom, not what.
 - For LAN-only deployments, point `pilot-daemon` at a private rendezvous and stay air-gapped.
-- When a node is explicitly adopted into Pilot Management, its pre/post action
-  envelopes—including tool inputs and results—are sent to the hosted federation
-  control plane for policy evaluation, approvals, and audit. That managed path
-  is opt-in and fail-closed for pre-action decisions.
 
 ## Comparison
 
