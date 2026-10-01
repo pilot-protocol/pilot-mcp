@@ -66,7 +66,7 @@ import { daemonBinaryPath, execPilotctl, pilotctlBinaryPath, pilotctlJSON } from
 import { daemonProxySetting, inspectProxy, parseProxySetting, proxyOnlySandbox, redactProxyURL, sandboxHost } from '../netproxy.js';
 import { readPilotConfig, SETUP_OWNER, setupOwnsTransport, writePilotConfig } from './pilot-config.js';
 import { planProxyRefresh } from './proxy-refresh.js';
-import { daemonFeatures, managedNodeReason, upgradeRuntimeForProxy } from './runtime.js';
+import { daemonFeatures, upgradeRuntimeForProxy } from './runtime.js';
 
 export const PILOT_SANDBOX_SKILL_URL = 'https://github.com/TeoSlayer/pilot-skills/tree/main/skills/pilot-sandbox';
 
@@ -88,7 +88,6 @@ const UNKNOWN_RUNTIME = Object.freeze({ known: false, proxy: false, proxyCmd: fa
 export async function installDaemon({
   transport,
   autoStart,
-  enterpriseControl,
   env = process.env,
   home = homedir(),
   log = defaultLog,
@@ -107,31 +106,17 @@ export async function installDaemon({
   let before = null;
   let skipStart = false;
   if (autoStart) {
-    if (enterpriseControl) {
-      const status = await execPilotctl(['daemon', 'status', '--check'], { capture: true });
-      if (status.code === 0) {
-        const stopped = await execPilotctl(['daemon', 'stop'], { capture: true });
-        if (stopped.code !== 0) throw new Error(`could not restart the existing daemon for managed control: ${stopped.stderr.trim()}`);
-      }
-    }
     plan = planDaemonStart({ transport, env, home });
     if (plan.mode === 'proxy-unsupported' && upgradeRuntime) {
-      // A managed node's pinned runtime is never swapped for the public
-      // release, whether or not --managed-url was given on this run.
-      const managed = enterpriseControl ? 'managed control' : managedNodeReason({ home, env });
-      if (managed) {
-        log(`  ${plan.daemon ?? 'pilot-daemon'} predates egress-proxy support; this node is managed (${managed}), so its pinned runtime is kept.`);
-      } else {
-        log(`  ${plan.daemon ?? 'pilot-daemon'} predates egress-proxy support; checking for a newer Pilot runtime…`);
-        try {
-          const result = await upgradeRuntime();
-          if (result?.upgraded) log(`  Upgraded the Pilot runtime from ${result.from} to ${result.to}.`);
-          else if (result?.reason) log(`  Keeping the installed runtime: ${result.reason}.`);
-        } catch (error) {
-          log(`  Runtime upgrade failed — ${error.message}`);
-        }
-        plan = planDaemonStart({ transport, env, home });
+      log(`  ${plan.daemon ?? 'pilot-daemon'} predates egress-proxy support; checking for a newer Pilot runtime…`);
+      try {
+        const result = await upgradeRuntime();
+        if (result?.upgraded) log(`  Upgraded the Pilot runtime from ${result.from} to ${result.to}.`);
+        else if (result?.reason) log(`  Keeping the installed runtime: ${result.reason}.`);
+      } catch (error) {
+        log(`  Runtime upgrade failed — ${error.message}`);
       }
+      plan = planDaemonStart({ transport, env, home });
     }
     for (const warning of plan.warnings) log(`  Warning: ${warning}`);
     syncRecordedTransport(home, plan, log);
@@ -167,15 +152,10 @@ export async function installDaemon({
       for (const line of plan.compatHint ?? []) log(`  ${line}`);
     }
     for (const line of refresh.lines) log(`  ${line}`);
-    if (enterpriseControl) startArgs.push('--enterprise-control', enterpriseControl);
     if (!skipStart) {
       started = await execPilotctl(startArgs, {
-        capture: Boolean(enterpriseControl),
         env: { ...daemonEnvironment(env, plan.runtime), ...refresh.env },
       });
-    }
-    if (enterpriseControl && exitCode(started) !== 0) {
-      throw new Error(`managed daemon start failed: ${String(started.stderr || started.stdout).trim()}`);
     }
   }
 

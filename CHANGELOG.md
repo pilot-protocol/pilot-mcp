@@ -6,6 +6,40 @@ All notable changes to the `pilotprotocol-mcp` npm adapter are documented here. 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-01
+
+### Removed
+- Everything that served Pilot's hosted control plane, which has been retired:
+  - `pilot-mcp attach` and `pilot-mcp setup --managed-url` (hosted enrollment
+    from `PILOT_ENROLLMENT_TOKEN`, the pinned `managed-runtime-*` download).
+    Both now exit 1 with a message saying they were removed.
+  - The `--enterprise-control` / `--governed-resource` arguments that
+    `pilot_send` and `pilot_send_file` added to `pilotctl send-message` and
+    `send-file` when `PILOT_ENTERPRISE_CONTROL` or
+    `~/.pilot/managed/enterprise-control.json` was present, and
+    `PILOT_GOVERNED_RESOURCE_TEMPLATE`.
+  - Native pre/post tool hooks. `setup` no longer installs them for Claude
+    Code, Codex CLI, Gemini CLI, Cursor, Cline, Copilot CLI, Hermes, OpenHands
+    or PicoClaw, and the OpenClaw plugin no longer registers tool or message
+    hooks.
+  - The `management` section of `pilot-mcp doctor` (text and `--json`), and the
+    rule that kept a managed node's runtime from being upgraded for egress-proxy
+    support.
+
+### Changed
+- `setup` removes the hook entries earlier releases wrote into harness
+  settings (and the Hermes shell-hook approvals, the Cline hook shims, and
+  PicoClaw's `hooks.processes.pilot`). Only Pilot's own commands are matched;
+  user and third-party hooks are kept, and a hook file Pilot created is deleted
+  once it holds nothing else.
+- `pilot-mcp hook --harness <id>` and `pilot-mcp picoclaw-hook` remain as
+  silent compatibility shims for settings not yet rewritten: they exit 0 and
+  let every tool call continue, without reading the event, calling `pilotctl`
+  or touching the network. A leftover control attachment no longer makes them
+  block.
+- The OpenClaw plugin keeps its `pilot-policy` id and only carries the Pilot
+  MCP server definition.
+
 ## [0.3.0] - 2026-09-24
 
 ### Fixed

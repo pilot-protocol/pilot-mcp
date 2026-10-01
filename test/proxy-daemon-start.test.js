@@ -145,63 +145,6 @@ test('a runtime upgrade that adds -proxy switches the start to compat through th
   assert.deepEqual(fx.calls()[0].args, ['daemon', 'start', '--transport', 'compat']);
 });
 
-test('managed nodes never swap their pinned runtime for proxy support', { skip }, async (t) => {
-  const fx = fixture(t, LEGACY_USAGE);
-  await installDaemon({
-    transport: 'compat',
-    autoStart: true,
-    enterpriseControl: '/secure/control.json',
-    env: fx.env({ HTTPS_PROXY: PROXY }),
-    home: fx.home,
-    log: () => {},
-    upgradeRuntime: () => assert.fail('managed runtimes are pinned'),
-  });
-  const start = fx.calls().find((call) => call.args[1] === 'start');
-  assert.deepEqual(start.args, ['daemon', 'start', '--enterprise-control', '/secure/control.json']);
-});
-
-test('a node adopted on an earlier run keeps its pinned runtime without --managed-url', { skip }, async (t) => {
-  for (const [name, adopt, evidence] of [
-    ['runtime tag', (fx) => {
-      mkdirSync(join(fx.home, '.pilot', 'bin'), { recursive: true });
-      writeFileSync(join(fx.home, '.pilot', 'bin', '.pilot-version'), 'managed-runtime-v0.1.5\n');
-    }, /runtime managed-runtime-v0\.1\.5/],
-    ['control attachment', (fx) => {
-      mkdirSync(join(fx.home, '.pilot', 'managed'), { recursive: true });
-      writeFileSync(join(fx.home, '.pilot', 'managed', 'enterprise-control.json'), '{}', { mode: 0o600 });
-    }, /enterprise control attachment/],
-    ['config key', (fx) => {
-      const config = JSON.parse(readFileSync(fx.config, 'utf8'));
-      writeFileSync(fx.config, JSON.stringify({ ...config, enterprise_control: '/secure/control.json' }));
-    }, /config\.json enterprise_control/],
-  ]) {
-    const fx = fixture(t, LEGACY_USAGE);
-    adopt(fx);
-    const lines = [];
-    await installDaemon({
-      transport: 'compat',
-      autoStart: true,
-      env: fx.env({ HTTPS_PROXY: PROXY }),
-      home: fx.home,
-      log: (line) => lines.push(line),
-      upgradeRuntime: () => assert.fail(`managed runtimes are pinned (${name})`),
-    });
-    assert.deepEqual(startCall(fx).args, ['daemon', 'start'], name);
-    assert.match(lines.join('\n'), evidence, name);
-    assert.match(lines.join('\n'), /pinned runtime is kept/, name);
-  }
-  // PILOT_ENTERPRISE_CONTROL (set by setup after hosted enrollment) counts too.
-  const fx = fixture(t, LEGACY_USAGE);
-  await installDaemon({
-    transport: 'compat',
-    autoStart: true,
-    env: fx.env({ HTTPS_PROXY: PROXY, PILOT_ENTERPRISE_CONTROL: '/secure/control.json' }),
-    home: fx.home,
-    log: () => {},
-    upgradeRuntime: () => assert.fail('managed runtimes are pinned (env)'),
-  });
-});
-
 test('the upgrade outcome is reported, and a kept runtime still gets the pilot-sandbox pointer', { skip }, async (t) => {
   const fx = fixture(t, LEGACY_USAGE);
   const lines = [];

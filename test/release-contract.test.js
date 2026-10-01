@@ -9,13 +9,12 @@ async function readJSON(path) {
 }
 
 test('npm and Official MCP Registry metadata stay version-locked', async () => {
-  const [pkg, server, card, versionSource, pluginManifest, pluginEvaluator] = await Promise.all([
+  const [pkg, server, card, versionSource, pluginManifest] = await Promise.all([
     readJSON('package.json'),
     readJSON('server.json'),
     readJSON('.well-known/mcp/server-card.json'),
     readFile(new URL('src/version.js', root), 'utf8'),
     readJSON('src/openclaw-plugin/openclaw.plugin.json'),
-    readFile(new URL('src/openclaw-plugin/evaluate.js', root), 'utf8'),
   ]);
 
   assert.equal(pkg.mcpName, server.name);
@@ -27,7 +26,6 @@ test('npm and Official MCP Registry metadata stay version-locked', async () => {
   assert.equal(card.serverInfo.version, pkg.version);
   assert.match(versionSource, new RegExp(`VERSION = '${pkg.version.replaceAll('.', '\\.')}';`));
   assert.deepEqual(pluginManifest.mcpServers.pilot.args, ['-y', `${pkg.name}@${pkg.version}`]);
-  assert.match(pluginEvaluator, new RegExp(`${pkg.name}@${pkg.version.replaceAll('.', '\\.')}`));
 });
 
 test('release workflow uses upstream publisher and repository GHCR namespace', async () => {

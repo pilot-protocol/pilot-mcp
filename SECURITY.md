@@ -13,7 +13,7 @@ advisory on the GitHub Security Advisories tab once a fix is available.
 In scope:
 - `pilotprotocol-mcp` npm package and its published adapter distributions
 - The `pilot-mcp setup` auto-config flow (config file writes, daemon install)
-- The stdio MCP server and native harness pre/post adapters
+- The stdio MCP server
 - Runtime discovery and the checksum-verified public core bootstrap retained
   for compatibility with existing setup flows
 
@@ -26,13 +26,14 @@ Out of scope (report upstream):
 
 Notable classes we explicitly defend against:
 
-1. **Hook-execution attack via config write.** `pilot-mcp setup` writes to
+1. **Command-execution attack via config write.** `pilot-mcp setup` writes to
    harness config files. We do not write arbitrary executable commands —
-   only version-pinned `pilotprotocol-mcp` stdio and native `hook --harness
-   <id> --phase pre|post` commands. The exact historical `heartbeat --claude`
-   invocation is retained only as a silent, non-networked compatibility shim
-   while setup removes obsolete settings. We never accept user-influenced
-   strings into hook command fields.
+   only the version-pinned `pilotprotocol-mcp` stdio MCP server command — and
+   never accept user-influenced strings into command fields. Setup installs no
+   tool hooks; it removes the `hook --harness <id>` entries releases <=0.3.0
+   wrote, matching only Pilot's own command. The historical `hook --harness`,
+   `picoclaw-hook` and `heartbeat --claude` invocations are retained only as
+   silent, non-networked compatibility shims for settings not yet rewritten.
 
 2. **Supply chain.** Releases are tagged + signed; npm publishes use
    `--provenance`; Docker images are SBOM + Sigstore signed via the

@@ -1,13 +1,10 @@
-// Cursor: write ~/.cursor/mcp.json and the current user-level native hook
-// contract. Cursor's generic PreToolUse boundary covers Agent/Cmd+K tools;
-// failClosed prevents a crashed, timed-out, or malformed Pilot hook from
-// becoming permission to execute. Repository/cloud agents need the same file
-// committed as .cursor/hooks.json because they cannot read the user's home.
+// Cursor: write ~/.cursor/mcp.json and remove the user-level hook entries
+// earlier Pilot releases wrote into ~/.cursor/hooks.json.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { hookCommand, isPilotHookCommand, pilotMcpServer } from './runtime.js';
+import { pilotMcpServer, removeFlatPilotHooks } from './runtime.js';
 
 const HOME = homedir();
 const MCP_JSON = join(HOME, '.cursor', 'mcp.json');
@@ -19,24 +16,20 @@ export async function configure() {
   current.mcpServers = current.mcpServers ?? {};
   current.mcpServers.pilot = pilotMcpServer();
   writeFileSync(MCP_JSON, JSON.stringify(current, null, 2));
-
-  const hooks = existsSync(HOOKS_JSON) ? JSON.parse(readFileSync(HOOKS_JSON, 'utf8')) : { version: 1, hooks: {} };
-  hooks.version = 1;
-  hooks.hooks = hooks.hooks ?? {};
-  installHook(hooks.hooks, 'preToolUse', 'pre', true);
-  installHook(hooks.hooks, 'postToolUse', 'post', false);
-  installHook(hooks.hooks, 'postToolUseFailure', 'post', false);
-  writeFileSync(HOOKS_JSON, JSON.stringify(hooks, null, 2));
+  removeRetiredHooks();
 }
 
-function installHook(hooks, event, phase, failClosed) {
-  hooks[event] = hooks[event] ?? [];
-  const command = hookCommand('cursor', phase);
-  const existing = hooks[event].find((hook) => isPilotHookCommand(hook.command, 'cursor', phase));
-  if (existing) {
-    existing.command = command;
-    if (failClosed) existing.failClosed = true;
-  } else {
-    hooks[event].push({ command, timeout: 30, ...(failClosed ? { failClosed: true } : {}) });
+// Releases <=0.3.0 installed preToolUse/postToolUse/postToolUseFailure
+// commands for the hosted control plane. Remove only those; when the file
+// then holds nothing but the version Pilot wrote, remove it too.
+function removeRetiredHooks() {
+  if (!existsSync(HOOKS_JSON)) return;
+  const hooks = JSON.parse(readFileSync(HOOKS_JSON, 'utf8'));
+  if (!removeFlatPilotHooks(hooks.hooks, ['preToolUse', 'postToolUse', 'postToolUseFailure'], 'cursor')) return;
+  const otherKeys = Object.keys(hooks).filter((key) => key !== 'version' && key !== 'hooks');
+  if (Object.keys(hooks.hooks).length === 0 && otherKeys.length === 0) {
+    unlinkSync(HOOKS_JSON);
+    return;
   }
+  writeFileSync(HOOKS_JSON, JSON.stringify(hooks, null, 2));
 }

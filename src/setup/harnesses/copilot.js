@@ -1,11 +1,10 @@
-// GitHub Copilot: configure the VS Code MCP server and Copilot CLI's user-level
-// pre/post hooks. Cloud agent jobs require committing the same hook file under
-// .github/hooks/ because they do not load a user's home directory.
+// GitHub Copilot CLI: configure the user-level MCP server and remove the hook
+// file earlier Pilot releases wrote under ~/.copilot/hooks.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
-import { hookCommand, isPilotHookCommand, pilotMcpServer } from './runtime.js';
+import { pilotMcpServer, removeFlatPilotHooks } from './runtime.js';
 
 const HOME = homedir();
 
@@ -26,7 +25,7 @@ export async function configure() {
   current.mcpServers.pilot = pilotMcpServer();
   writeFileSync(config, JSON.stringify(current, null, 2));
   removeObsoleteVSCodeEntry();
-  installHooks();
+  removeRetiredHooks();
 }
 
 function removeObsoleteVSCodeEntry() {
@@ -47,29 +46,17 @@ function removeObsoleteVSCodeEntry() {
   writeFileSync(settings, JSON.stringify(current, null, 2));
 }
 
-function installHooks() {
-  const hooksDirectory = join(HOME, '.copilot', 'hooks');
-  const path = join(hooksDirectory, 'pilot.json');
-  mkdirSync(hooksDirectory, { recursive: true });
-  const current = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : { version: 1, hooks: {} };
-  current.version = 1;
-  current.hooks = current.hooks ?? {};
-  installHook(current.hooks, 'preToolUse', 'pre');
-  installHook(current.hooks, 'postToolUse', 'post');
-  installHook(current.hooks, 'postToolUseFailure', 'post');
-  writeFileSync(path, JSON.stringify(current, null, 2));
-}
-
-function installHook(hooks, event, phase) {
-  hooks[event] = hooks[event] ?? [];
-  const command = hookCommand('copilot', phase);
-  const existing = hooks[event].find((hook) =>
-    isPilotHookCommand(hook.command ?? hook.bash ?? hook.powershell, 'copilot', phase)
-  );
-  if (existing) {
-    delete existing.command;
-    Object.assign(existing, { type: 'command', bash: command, powershell: command, timeoutSec: 30 });
-  } else {
-    hooks[event].push({ type: 'command', bash: command, powershell: command, timeoutSec: 30 });
+// Releases <=0.3.0 wrote ~/.copilot/hooks/pilot.json for the hosted control
+// plane. Remove Pilot's entries; the file is Pilot's own, so drop it once it
+// holds no other hook.
+function removeRetiredHooks() {
+  const path = join(HOME, '.copilot', 'hooks', 'pilot.json');
+  if (!existsSync(path)) return;
+  const current = JSON.parse(readFileSync(path, 'utf8'));
+  if (!removeFlatPilotHooks(current.hooks, ['preToolUse', 'postToolUse', 'postToolUseFailure'], 'copilot')) return;
+  if (Object.keys(current.hooks).length === 0) {
+    unlinkSync(path);
+    return;
   }
+  writeFileSync(path, JSON.stringify(current, null, 2));
 }
